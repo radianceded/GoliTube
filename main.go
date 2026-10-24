@@ -5,7 +5,15 @@ import (
 	"log"
 	"net/http"
 )
+
+
 func health(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+	  w.Header().Set("Allow", http.MethodGet)
+	  http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	  return
+}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprint(w, "ccb")
 }
 
