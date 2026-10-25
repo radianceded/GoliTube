@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 )
 var upgrader = websocket.Upgrader{}
+var connections = make(map[*websocket.Conn]bool)
+var connectionsMu sync.Mutex
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -18,6 +21,21 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	log.Println("WebSocket连接已建立")
 
 	defer conn.Close()
+
+	connectionsMu.Lock()
+    connections[conn] = true
+    count := len(connections)
+    connectionsMu.Unlock()
+	defer func() {
+	  connectionsMu.Lock()
+	  delete(connections, conn)
+	  count := len(connections)
+	  connectionsMu.Unlock()
+
+	  log.Println("连接移除，当前在线连接数：", count)
+    }()
+
+    log.Println("连接加入，当前在线连接数：", count)
     for {
 	  messageType, message, err := conn.ReadMessage()
 	  if err != nil {
