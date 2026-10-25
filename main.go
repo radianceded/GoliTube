@@ -18,22 +18,21 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	log.Println("WebSocket连接已建立")
 
 	defer conn.Close()
+    for {
+	  messageType, message, err := conn.ReadMessage()
+	  if err != nil {
+		  log.Println("读取消息失败:", err)
+		  return
+	  }
 
-	messageType, message, err := conn.ReadMessage()
-	if err != nil {
-		log.Println("读取消息失败:", err)
-		return
-	}
+	  log.Println("消息类型:", messageType,"消息内容:", string(message))
 
-	log.Println("消息类型:", messageType,"消息内容:", string(message))
-
-	
-
-	err = conn.WriteMessage(messageType, message)
-	if err != nil {
-		log.Println("发送消息失败:", err)
-		return
-	}
+	  err = conn.WriteMessage(messageType, message)
+	  if err != nil {
+		  log.Println("发送消息失败:", err)
+		  return
+	  }
+    }
 }
         
 func health(w http.ResponseWriter, r *http.Request) {
