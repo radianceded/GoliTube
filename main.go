@@ -1,17 +1,54 @@
 package main
 
 import (
-	"github.com/gorilla/websocket"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
+
 var upgrader = websocket.Upgrader{}
-var connections = make(map[*websocket.Conn]bool)
-var connectionsMu sync.Mutex
+
+// 第一层按房间名查找，第二层保存该房间的在线连接。
+var rooms = make(map[string]map[*websocket.Conn]bool)
+var roomsMu sync.Mutex
+
+func broadcast(roomID string, messageType int, message []byte) {
+	// ponytail: 全局锁串行广播；慢连接会延迟其他连接，后续用每连接发送队列隔离。
+	roomsMu.Lock()
+	defer roomsMu.Unlock()
+
+	members := rooms[roomID]
+	for client := range members {
+		err := client.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err == nil {
+			err = client.WriteMessage(messageType, message)
+		}
+		if err != nil {
+			log.Println("广播消息失败:", err)
+			delete(members, client)
+			client.Close()
+		}
+	}
+	if len(members) == 0 {
+		delete(rooms, roomID)
+	}
+}
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	roomID := strings.TrimSpace(r.URL.Query().Get("room"))
+	if roomID == "" {
+		roomID = "lobby"
+	}
+	if len(roomID) > 128 {
+		http.Error(w, "room name must be at most 128 bytes", http.StatusBadRequest)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("升级WebSocket连接失败:", err)
@@ -22,37 +59,39 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	defer conn.Close()
 
-	connectionsMu.Lock()
-    connections[conn] = true
-    count := len(connections)
-    connectionsMu.Unlock()
+	roomsMu.Lock()
+	if rooms[roomID] == nil {
+		rooms[roomID] = make(map[*websocket.Conn]bool)
+	}
+	rooms[roomID][conn] = true
+	count := len(rooms[roomID])
+	roomsMu.Unlock()
 	defer func() {
-	  connectionsMu.Lock()
-	  delete(connections, conn)
-	  count := len(connections)
-	  connectionsMu.Unlock()
+		roomsMu.Lock()
+		delete(rooms[roomID], conn)
+		count := len(rooms[roomID])
+		if count == 0 {
+			delete(rooms, roomID)
+		}
+		roomsMu.Unlock()
 
-	  log.Println("连接移除，当前在线连接数：", count)
-    }()
+		log.Printf("连接移除，房间 %q 在线连接数：%d", roomID, count)
+	}()
 
-    log.Println("连接加入，当前在线连接数：", count)
-    for {
-	  messageType, message, err := conn.ReadMessage()
-	  if err != nil {
-		  log.Println("读取消息失败:", err)
-		  return
-	  }
+	log.Printf("连接加入，房间 %q 在线连接数：%d", roomID, count)
+	for {
+		messageType, message, err := conn.ReadMessage()
+		if err != nil {
+			log.Println("读取消息失败:", err)
+			return
+		}
 
-	  log.Println("消息类型:", messageType,"消息内容:", string(message))
+		log.Println("消息类型:", messageType, "消息内容:", string(message))
 
-	  err = conn.WriteMessage(messageType, message)
-	  if err != nil {
-		  log.Println("发送消息失败:", err)
-		  return
-	  }
-    }
+		broadcast(roomID, messageType, message)
+	}
 }
-        
+
 func health(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
