@@ -55,10 +55,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println("WebSocket连接已建立")
-
-	defer conn.Close()
-
 	roomsMu.Lock()
 	if rooms[roomID] == nil {
 		rooms[roomID] = make(map[*websocket.Conn]bool)
@@ -66,6 +62,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	rooms[roomID][conn] = true
 	count := len(rooms[roomID])
 	roomsMu.Unlock()
+	//上锁创建房间
+
+	log.Println("WebSocket连接已建立")
+
+	defer conn.Close()
+
 	defer func() {
 		roomsMu.Lock()
 		delete(rooms[roomID], conn)
