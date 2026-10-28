@@ -12,9 +12,36 @@ import (
 )
 
 var upgrader = websocket.Upgrader{}
+type Message struct{
+	Type int
+	Data []byte
+}
+//a ws message waiting to be sent
+type Client struct{
+	Conn *websocket.Conn
+	Send chan Message
+}
+// a client conn and its sending queue
+func (c *Client) writePump() {
+    defer c.Conn.Close()
+
+    for message := range c.Send {
+        err := c.Conn.SetWriteDeadline(time.Now().Add(3.6 * time.Second))
+        if err != nil {
+            log.Println("设置写超时失败:", err)
+            return
+        }
+
+        err = c.Conn.WriteMessage(message.Type, message.Data)
+        if err != nil {
+            log.Println("发送消息失败:", err)
+            return
+        }
+    }
+}
 
 // 第一层按房间名查找，第二层保存该房间的在线连接。
-var rooms = make(map[string]map[*websocket.Conn]bool)
+var rooms = make(map[string]map[*websocket.Conn]*Client)
 var roomsMu sync.Mutex
 
 func broadcast(roomID string, messageType int, message []byte) {
