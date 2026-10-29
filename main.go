@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,62 +12,108 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	maxMessageSize = 4096
+	pingInterval   = 25 * time.Second
+	pongWait       = 60 * time.Second
+	writeWait      = 5 * time.Second
+)
+
 var upgrader = websocket.Upgrader{}
-type Message struct{
+
+type Message struct {
 	Type int
 	Data []byte
 }
-//a ws message waiting to be sent
-type Client struct{
+
+// a ws message waiting to be sent
+type Client struct {
 	Conn *websocket.Conn
 	Send chan Message
 }
+
 // a client conn and its sending queue
-func (c *Client) writePump() {
-    defer c.Conn.Close()
+func (c *Client) writePump(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	defer c.Conn.Close()
 
-    for message := range c.Send {
-        err := c.Conn.SetWriteDeadline(time.Now().Add(3.6 * time.Second))
-        if err != nil {
-            log.Println("设置写超时失败:", err)
-            return
-        }
+	for {
+		var message Message
 
-        err = c.Conn.WriteMessage(message.Type, message.Data)
-        if err != nil {
-            log.Println("发送消息失败:", err)
-            return
-        }
-    }
+		// 先处理已到期的心跳，避免持续有弹幕时反复延后 Ping。
+		select {
+		case <-ticker.C:
+			message.Type = websocket.PingMessage
+		default:
+			select {
+			case next, open := <-c.Send:
+				if !open {
+					return
+				}
+				message = next
+			case <-ticker.C:
+				message.Type = websocket.PingMessage
+			}
+		}
+
+		err := c.Conn.SetWriteDeadline(
+			time.Now().Add(writeWait),
+		)
+		if err != nil {
+			log.Println("设置写超时失败:", err)
+			return
+		}
+
+		err = c.Conn.WriteMessage(message.Type, message.Data)
+		if err != nil {
+			log.Println("发送消息失败:", err)
+			return
+		}
+	}
 }
 
-// 第一层按房间名查找，第二层保存该房间的在线连接。
+// continuely reading sending queue and writing to the websocket connection, until the queue is closed or an error occurs
+
 var rooms = make(map[string]map[*websocket.Conn]*Client)
+
+// rooms[ID][conn] = client
 var roomsMu sync.Mutex
 
+// initialize a global mutex to protect the rooms map
+
 func broadcast(roomID string, messageType int, message []byte) {
-	// ponytail: 全局锁串行广播；慢连接会延迟其他连接，后续用每连接发送队列隔离。
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
 
 	members := rooms[roomID]
-	for client := range members {
-		err := client.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err == nil {
-			err = client.WriteMessage(messageType, message)
-		}
-		if err != nil {
-			log.Println("广播消息失败:", err)
-			delete(members, client)
-			client.Close()
+	for conn, client := range members {
+		select {
+		case client.Send <- Message{
+			Type: messageType,
+			Data: message,
+		}:
+			// 成功放入该客户端的发送队列。
+		default:
+			// 队列没有可用位置，移除并断开慢连接。
+			log.Println("发送队列已满，断开连接")
+			delete(members, conn)
+			close(client.Send)
+			conn.Close()
 		}
 	}
+
 	if len(members) == 0 {
 		delete(rooms, roomID)
 	}
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	serveWebSocket(w, r, pingInterval, pongWait)
+}
+
+// 显式传入心跳时间，便于测试使用较短的期限，不修改全局配置。
+func serveWebSocket(w http.ResponseWriter, r *http.Request, interval, wait time.Duration) {
 	roomID := strings.TrimSpace(r.URL.Query().Get("room"))
 	if roomID == "" {
 		roomID = "lobby"
@@ -81,31 +128,53 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Println("升级WebSocket连接失败:", err)
 		return
 	}
-
-	roomsMu.Lock()
-	if rooms[roomID] == nil {
-		rooms[roomID] = make(map[*websocket.Conn]bool)
+	// upgrade from http to websocket
+	defer conn.Close()
+	conn.SetReadLimit(maxMessageSize)
+	// set a maximum message size to prevent abuse
+	if err := conn.SetReadDeadline(time.Now().Add(wait)); err != nil {
+		log.Println("设置初始读超时失败:", err)
+		return
 	}
-	rooms[roomID][conn] = true
+	conn.SetPongHandler(func(_ string) error {
+		return conn.SetReadDeadline(time.Now().Add(wait))
+	})
+
+	client := &Client{
+		Conn: conn,
+		Send: make(chan Message, 256),
+	}
+	roomsMu.Lock()
+
+	if rooms[roomID] == nil {
+		rooms[roomID] = make(map[*websocket.Conn]*Client)
+	}
+	rooms[roomID][conn] = client
 	count := len(rooms[roomID])
 	roomsMu.Unlock()
-	//上锁创建房间
+	//lock to avoid race condition when adding connection to room and counting connections
 
 	log.Println("WebSocket连接已建立")
 
-	defer conn.Close()
-
 	defer func() {
 		roomsMu.Lock()
-		delete(rooms[roomID], conn)
-		count := len(rooms[roomID])
+
+		members := rooms[roomID]
+		if _, exists := members[conn]; exists {
+			delete(members, conn)
+			close(client.Send)
+		}
+
+		count := len(members)
 		if count == 0 {
 			delete(rooms, roomID)
 		}
-		roomsMu.Unlock()
 
+		roomsMu.Unlock()
 		log.Printf("连接移除，房间 %q 在线连接数：%d", roomID, count)
 	}()
+
+	go client.writePump(interval)
 
 	log.Printf("连接加入，房间 %q 在线连接数：%d", roomID, count)
 	for {
@@ -132,11 +201,14 @@ func health(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	addr := flag.String("addr", "localhost:8081", "HTTP 服务监听地址")
+	flag.Parse()
+
 	http.HandleFunc("/health", health)
 	http.HandleFunc("/ws", handleWebSocket)
-	log.Println("准备监听http://localhost:8081")
+	log.Printf("准备监听 http://%s", *addr)
 
-	err := http.ListenAndServe("localhost:8081", nil)
+	err := http.ListenAndServe(*addr, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
