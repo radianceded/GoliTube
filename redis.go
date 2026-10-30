@@ -17,6 +17,14 @@ type RoomEvent struct {
 	Data   []byte `json:"data"`
 }
 
+func publishRoomEvent(ctx context.Context, rdb *redis.Client, event RoomEvent) error {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	return rdb.Publish(ctx, danmakuChannel, payload).Err()
+}
+
 func consumeRoomEvents(ctx context.Context, sub *redis.PubSub) {
 	messages := sub.Channel()
 

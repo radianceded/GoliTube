@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,12 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+// 单实例测试注入本地转发，避免把 Redis 作为所有测试的前置条件。
+func localPublish(_ context.Context, event RoomEvent) error {
+	broadcast(event.RoomID, event.Type, event.Data)
+	return nil
+}
 
 func waitForRoomCount(t *testing.T, roomID string, want int) {
 	t.Helper()
@@ -31,7 +39,7 @@ func waitForRoomCount(t *testing.T, roomID string, want int) {
 }
 
 func TestBroadcast(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(handleWebSocket))
+	server := httptest.NewServer(handleWebSocket(localPublish))
 	defer server.Close()
 	defer waitForRoomCount(t, "lobby", 0)
 
@@ -103,7 +111,7 @@ func TestBroadcast(t *testing.T) {
 }
 
 func TestRoomIsolationAndRejoin(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(handleWebSocket))
+	server := httptest.NewServer(handleWebSocket(localPublish))
 	t.Cleanup(server.Close)
 	t.Cleanup(func() {
 		waitForRoomCount(t, "red", 0)
@@ -232,7 +240,7 @@ func TestFullQueueDisconnects(t *testing.T) {
 func TestRoomNameLimit(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/ws?room="+strings.Repeat("a", 129), nil)
 	response := httptest.NewRecorder()
-	handleWebSocket(response, request)
+	handleWebSocket(localPublish)(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
 	}
@@ -245,7 +253,7 @@ func TestHeartbeat(t *testing.T) {
 		t.Run(fmt.Sprintf("reply=%v", reply), func(t *testing.T) {
 			roomID := fmt.Sprintf("heartbeat-%v", reply)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				serveWebSocket(w, r, interval, wait)
+				serveWebSocket(w, r, interval, wait, localPublish)
 			}))
 			t.Cleanup(server.Close)
 			t.Cleanup(func() { waitForRoomCount(t, roomID, 0) })
@@ -326,4 +334,35 @@ func TestHeartbeat(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPublishFailureClosesConnection(t *testing.T) {
+	server := httptest.NewServer(handleWebSocket(func(context.Context, RoomEvent) error {
+		return errors.New("模拟发布失败")
+	}))
+	defer server.Close()
+	const roomID = "publish-failure"
+	defer waitForRoomCount(t, roomID, 0)
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(server.URL, "http")+"?room="+roomID, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	waitForRoomCount(t, roomID, 1)
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("will fail")); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = conn.ReadMessage()
+	if err == nil {
+		t.Fatal("发布失败后不应收到本地回声")
+	}
+	if timeout, ok := err.(interface{ Timeout() bool }); ok && timeout.Timeout() {
+		t.Fatal("连接未被主动关闭，等到了客户端自己的超时")
+	}
+	waitForRoomCount(t, roomID, 0)
 }

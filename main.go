@@ -110,12 +110,14 @@ func broadcast(roomID string, messageType int, message []byte) {
 	}
 }
 
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	serveWebSocket(w, r, pingInterval, pongWait)
+func handleWebSocket(publish func(context.Context, RoomEvent) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serveWebSocket(w, r, pingInterval, pongWait, publish)
+	}
 }
 
-// 显式传入心跳时间，便于测试使用较短的期限，不修改全局配置。
-func serveWebSocket(w http.ResponseWriter, r *http.Request, interval, wait time.Duration) {
+// 显式传入心跳时间和发布函数，测试可缩短期限并独立验证本地行为。
+func serveWebSocket(w http.ResponseWriter, r *http.Request, interval, wait time.Duration, publish func(context.Context, RoomEvent) error) {
 	roomID := strings.TrimSpace(r.URL.Query().Get("room"))
 	if roomID == "" {
 		roomID = "lobby"
@@ -188,7 +190,17 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, interval, wait time.
 
 		log.Println("消息类型:", messageType, "消息内容:", string(message))
 
-		broadcast(roomID, messageType, message)
+		publishCtx, cancelPublish := context.WithTimeout(r.Context(), 3*time.Second)
+		err = publish(publishCtx, RoomEvent{
+			RoomID: roomID,
+			Type:   messageType,
+			Data:   message,
+		})
+		cancelPublish()
+		if err != nil {
+			log.Println("发布弹幕失败，关闭连接:", err)
+			return
+		}
 	}
 }
 
@@ -255,9 +267,12 @@ func run(addr, redisAddr string) error {
 	}()
 	log.Println("Redis 频道订阅成功:", danmakuChannel)
 
-	http.HandleFunc("/health", health)
-	http.HandleFunc("/ws", handleWebSocket)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", health)
+	mux.HandleFunc("/ws", handleWebSocket(func(ctx context.Context, event RoomEvent) error {
+		return publishRoomEvent(ctx, rdb, event)
+	}))
 	log.Printf("准备监听 http://%s", addr)
 
-	return http.ListenAndServe(addr, nil)
+	return http.ListenAndServe(addr, mux)
 }

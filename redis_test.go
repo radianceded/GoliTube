@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -30,7 +29,7 @@ func TestConsumeRoomEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(handleWebSocket))
+	server := httptest.NewServer(handleWebSocket(localPublish))
 	defer server.Close()
 	roomID := fmt.Sprintf("redis-test-%d", time.Now().UnixNano())
 	defer waitForRoomCount(t, roomID, 0)
