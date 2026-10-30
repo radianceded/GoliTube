@@ -230,6 +230,31 @@ func run(addr, redisAddr string) error {
 	}
 	log.Println("Redis 连接成功")
 
+	subCtx, stopSubscription := context.WithCancel(context.Background())
+	sub := rdb.Subscribe(subCtx, danmakuChannel)
+
+	// Redis 确认订阅成功后，才开放 HTTP 服务。
+	confirmCtx, cancelConfirm := context.WithTimeout(subCtx, 3*time.Second)
+	_, err = sub.Receive(confirmCtx)
+	cancelConfirm()
+	if err != nil {
+		stopSubscription()
+		sub.Close()
+		return fmt.Errorf("订阅 Redis 频道失败: %w", err)
+	}
+
+	subscriptionDone := make(chan struct{})
+	go func() {
+		defer close(subscriptionDone)
+		consumeRoomEvents(subCtx, sub)
+	}()
+	defer func() {
+		stopSubscription()
+		sub.Close()
+		<-subscriptionDone
+	}()
+	log.Println("Redis 频道订阅成功:", danmakuChannel)
+
 	http.HandleFunc("/health", health)
 	http.HandleFunc("/ws", handleWebSocket)
 	log.Printf("准备监听 http://%s", addr)

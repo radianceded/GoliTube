@@ -8,7 +8,7 @@
 
 已实现 WebSocket 持续收发、加入房间、同房间广播（包含发送者）、断开清理与空房间回收。
 
-启动前准备 Redis（默认 `127.0.0.1:6379`），运行 `go run . -addr localhost:8081 -redis-addr 127.0.0.1:6379`。服务会先验证 Redis 连接，失败则退出。当前仅接入启动检查，尚未使用 Redis 发布订阅，弹幕仍只在单实例内广播。
+启动前准备 Redis（默认 `127.0.0.1:6379`），运行 `go run . -addr localhost:8081 -redis-addr 127.0.0.1:6379`。服务先验证 Redis 连接并确认订阅 `golitube:danmaku`，失败则退出；收到合法事件后向本机对应房间广播。客户端消息尚未改为发布到 Redis，仍只直接在单实例内广播，因此跨实例链路尚未完成。
 
 Windows 使用 WSL Ubuntu 中的 Redis 时，开发期间保持一个 `wsl -d Ubuntu` 终端打开，并在其中用 `redis-cli ping` 确认返回 `PONG`。本机验证发现，没有持续会话时 WSL 可能停止，Windows 侧的 Redis 端口随之不可用。
 
