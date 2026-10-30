@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -202,14 +204,35 @@ func health(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	addr := flag.String("addr", "localhost:8081", "HTTP 服务监听地址")
+	redisAddr := flag.String("redis-addr", "127.0.0.1:6379", "Redis 服务地址")
 	flag.Parse()
+
+	if err := run(*addr, *redisAddr); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(addr, redisAddr string) error {
+	rdb := redis.NewClient(&redis.Options{
+		Addr:                  redisAddr,
+		DialTimeout:           3 * time.Second,
+		ReadTimeout:           3 * time.Second,
+		WriteTimeout:          3 * time.Second,
+		ContextTimeoutEnabled: true,
+	})
+	defer rdb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	err := rdb.Ping(ctx).Err()
+	cancel()
+	if err != nil {
+		return fmt.Errorf("连接 Redis 失败: %w", err)
+	}
+	log.Println("Redis 连接成功")
 
 	http.HandleFunc("/health", health)
 	http.HandleFunc("/ws", handleWebSocket)
-	log.Printf("准备监听 http://%s", *addr)
+	log.Printf("准备监听 http://%s", addr)
 
-	err := http.ListenAndServe(*addr, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	return http.ListenAndServe(addr, nil)
 }
