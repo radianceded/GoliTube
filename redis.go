@@ -24,7 +24,7 @@ func publishRoomEvent(ctx context.Context, rdb *redis.Client, event RoomEvent) e
 	}
 	return rdb.Publish(ctx, danmakuChannel, payload).Err()
 }
-
+//用来接收 Redis 中的弹幕事件，并将其广播给对应房间的所有客户端。
 func consumeRoomEvents(ctx context.Context, sub *redis.PubSub) {
 	messages := sub.Channel()
 
@@ -53,4 +53,5 @@ func consumeRoomEvents(ctx context.Context, sub *redis.PubSub) {
 			broadcast(event.RoomID, event.Type, event.Data)
 		}
 	}
-}
+}//这个函数用于将弹幕消息广播给指定房间的所有客户端。它会遍历房间中的所有客户端，并将消息发送到每个客户端的发送队列中。如果发送队列已关闭，则会从房间中移除该客户端。
+
