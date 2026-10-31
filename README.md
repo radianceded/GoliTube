@@ -10,7 +10,7 @@
 
 启动前准备 Redis（默认 `127.0.0.1:6379`），运行 `go run . -addr localhost:8081 -redis-addr 127.0.0.1:6379`。服务先验证 Redis 连接并确认订阅 `golitube:danmaku`，失败则退出。客户端消息编码为带房间 ID 的事件后发布到 Redis，所有订阅实例收到后仅向本机对应房间广播；发送实例也通过订阅接收自己的事件，不另行直接广播。
 
-第二个终端运行 `go run . -addr localhost:8082 -redis-addr 127.0.0.1:6379`，两个客户端分别连接 8081 和 8082 的同名房间，即可验证跨实例收发。当前所有实例订阅同一公共频道，尚未按房间分片。Redis Pub/Sub 不保存离线消息，发布成功不等于客户端收到；发布出错或超过 3 秒期限时关闭发送连接，不回退为仅本地广播。尚未验证断连恢复、提供去重或端到端送达确认。
+第二个终端运行 `go run . -addr localhost:8082 -redis-addr 127.0.0.1:6379`，两个客户端分别连接 8081 和 8082 的同名房间，即可验证跨实例收发。当前所有实例订阅同一公共频道，尚未按房间分片。Redis Pub/Sub 不保存离线消息，发布成功不等于客户端收到；发布出错或超过 3 秒期限时关闭发送连接，不回退为仅本地广播。已验证单次 Redis 正常停服后重启时，Go 实例不重启即可恢复订阅；发送失败的客户端需要重新连接，未发送的客户端可保持原连接继续收发。不提供去重或端到端送达确认，故障期间消息不会补发。实验范围和结果见 [Redis 停服恢复实验](docs/redis-restart-experiment.md)。
 
 Windows 使用 WSL Ubuntu 中的 Redis 时，开发期间保持一个 `wsl -d Ubuntu` 终端打开，并在其中用 `redis-cli ping` 确认返回 `PONG`。本机验证发现，没有持续会话时 WSL 可能停止，Windows 侧的 Redis 端口随之不可用。
 
@@ -19,6 +19,8 @@ Windows 使用 WSL Ubuntu 中的 Redis 时，开发期间保持一个 `wsl -d Ub
 运行 `go test ./...` 验证同房间并发广播、跨房间隔离、断开与空房间回收，以及回收后重新加入。运行 `go test -race ./...` 检查数据竞争。
 
 真实 Redis 测试默认跳过。在 PowerShell 中设置 `$env:GOLITUBE_TEST_REDIS_ADDR = '127.0.0.1:6379'` 后运行 `go test -race -v -timeout 30s ./...`，会额外验证事件接收过滤和两个独立进程的同房间双向广播、二进制消息与房间隔离。普通单实例测试注入本地转发函数，不需要 Redis；它们不能代替真实 Redis 测试。
+
+停服恢复实验单独启用：设置 `$env:GOLITUBE_TEST_REDIS_RESTART = '1'`，运行 `go test -race -v -run '^TestRedisRestartRecovery$' -timeout 60s .`。测试启动专用 Redis 并只停止该实例，不操作现有的 6379；Windows 要求 WSL Ubuntu 已安装 `redis-server`，临时目录应位于可从 WSL 访问的本地磁盘。
 
 当前广播在全局锁内向每连接独立的 256 条发送队列非阻塞入队，队列满则断开连接；业务消息由各连接的发送 goroutine 写入网络，单次写入超时为 5 秒。消息上限为 4 KiB，心跳每 25 秒发送 Ping，收到 Pong 后延长 60 秒读期限，超时则清理连接。
 

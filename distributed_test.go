@@ -22,45 +22,47 @@ func TestRedisInstanceProcess(t *testing.T) {
 	}
 }
 
+func startTestInstance(t *testing.T, redisAddr string) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	listener.Close()
+	command := exec.Command(os.Args[0], "-test.run=^TestRedisInstanceProcess$")
+	command.Env = append(os.Environ(), "GOLITUBE_INSTANCE_PROCESS=1", "GOLITUBE_INSTANCE_ADDR="+addr, "GOLITUBE_TEST_REDIS_ADDR="+redisAddr)
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		command.Process.Kill()
+		command.Wait()
+	})
+	client := &http.Client{Timeout: 300 * time.Millisecond}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err := client.Get("http://" + addr + "/health")
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return addr
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("子进程未就绪: ", addr)
+	return ""
+}
+
 func TestCrossInstanceBroadcast(t *testing.T) {
-	if os.Getenv("GOLITUBE_TEST_REDIS_ADDR") == "" {
+	redisAddr := os.Getenv("GOLITUBE_TEST_REDIS_ADDR")
+	if redisAddr == "" {
 		t.Skip("设置 GOLITUBE_TEST_REDIS_ADDR 显式启用真实 Redis 测试")
 	}
-	startInstance := func() string {
-		t.Helper()
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		addr := listener.Addr().String()
-		listener.Close()
-		command := exec.Command(os.Args[0], "-test.run=^TestRedisInstanceProcess$")
-		command.Env = append(os.Environ(), "GOLITUBE_INSTANCE_PROCESS=1", "GOLITUBE_INSTANCE_ADDR="+addr)
-		command.Stdout = os.Stdout
-		command.Stderr = os.Stderr
-		if err := command.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			command.Process.Kill()
-			command.Wait()
-		})
-		client := &http.Client{Timeout: 300 * time.Millisecond}
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			response, err := client.Get("http://" + addr + "/health")
-			if err == nil {
-				response.Body.Close()
-				if response.StatusCode == http.StatusOK {
-					return addr
-				}
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		t.Fatal("子进程未就绪: ", addr)
-		return ""
-	}
-	first, second := startInstance(), startInstance()
+	first, second := startTestInstance(t, redisAddr), startTestInstance(t, redisAddr)
 	roomID := fmt.Sprintf("distributed-%d", time.Now().UnixNano())
 	dial := func(addr, room string) *websocket.Conn {
 		t.Helper()
