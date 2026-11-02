@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
@@ -192,6 +195,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, interval, wait time.
 
 		publishCtx, cancelPublish := context.WithTimeout(r.Context(), 3*time.Second)
 		err = publish(publishCtx, RoomEvent{
+			ID:     rand.Text(),
 			RoomID: roomID,
 			Type:   messageType,
 			Data:   message,
@@ -217,14 +221,39 @@ func health(w http.ResponseWriter, r *http.Request) {
 func main() {
 	addr := flag.String("addr", "localhost:8081", "HTTP 服务监听地址")
 	redisAddr := flag.String("redis-addr", "127.0.0.1:6379", "Redis 服务地址")
+	mode := flag.String("mode", "server", "运行模式：server 或 persist")
+	brokers := flag.String("kafka-brokers", "", "Kafka 地址，逗号分隔；server 留空时仅实时广播")
 	flag.Parse()
 
-	if err := run(*addr, *redisAddr); err != nil {
+	var err error
+	switch *mode {
+	case "server":
+		if *brokers == "" {
+			err = run(*addr, *redisAddr)
+		} else {
+			writer := newEventWriter(strings.Split(*brokers, ","))
+			err = runServer(*addr, *redisAddr, func(ctx context.Context, event RoomEvent) error {
+				return enqueueRoomEvent(ctx, writer, event)
+			})
+			writer.Close()
+		}
+	case "persist":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		err = runPersistence(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"))
+	default:
+		err = fmt.Errorf("未知运行模式 %q", *mode)
+	}
+	if err != nil {
 		log.Fatal(err)
 	}
 }
 
 func run(addr, redisAddr string) error {
+	return runServer(addr, redisAddr, nil)
+}
+
+func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) error) error {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:                  redisAddr,
 		DialTimeout:           3 * time.Second,
@@ -269,9 +298,13 @@ func run(addr, redisAddr string) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", health)
-	mux.HandleFunc("/ws", handleWebSocket(func(ctx context.Context, event RoomEvent) error {
+	publish := func(ctx context.Context, event RoomEvent) error {
 		return publishRoomEvent(ctx, rdb, event)
-	}))
+	}
+	if enqueue != nil {
+		publish = durablePublish(enqueue, publish)
+	}
+	mux.HandleFunc("/ws", handleWebSocket(publish))
 	log.Printf("准备监听 http://%s", addr)
 
 	return http.ListenAndServe(addr, mux)

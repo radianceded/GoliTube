@@ -12,6 +12,7 @@ import (
 const danmakuChannel = "golitube:danmaku"
 
 type RoomEvent struct {
+	ID     string `json:"id"`
 	RoomID string `json:"room_id"`
 	Type   int    `json:"type"`
 	Data   []byte `json:"data"`

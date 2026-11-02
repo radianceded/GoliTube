@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,6 +19,50 @@ import (
 func localPublish(_ context.Context, event RoomEvent) error {
 	broadcast(event.RoomID, event.Type, event.Data)
 	return nil
+}
+
+func TestMessageIdentity(t *testing.T) {
+	events := make(chan RoomEvent, 2)
+	server := httptest.NewServer(handleWebSocket(func(ctx context.Context, event RoomEvent) error {
+		// 模拟事件经消息队列编码、解码后仍保留同一 ID。
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		var decoded RoomEvent
+		if err := json.Unmarshal(payload, &decoded); err != nil {
+			return err
+		}
+		events <- decoded
+		return localPublish(ctx, decoded)
+	}))
+	defer server.Close()
+	const roomID = "message-identity"
+	defer waitForRoomCount(t, roomID, 0)
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"?room="+roomID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var previousID string
+	for range 2 {
+		// 相同内容可以是两条合法弹幕，应拥有不同的事件 ID。
+		if err := conn.WriteMessage(websocket.TextMessage, []byte("same content")); err != nil {
+			t.Fatal(err)
+		}
+		kind, body, err := conn.ReadMessage()
+		if err != nil || kind != websocket.TextMessage || string(body) != "same content" {
+			t.Fatalf("unexpected echo: type=%d body=%q err=%v", kind, body, err)
+		}
+		event := <-events
+		if event.ID == "" || event.ID == previousID || event.RoomID != roomID || event.Type != kind || string(event.Data) != string(body) {
+			t.Fatalf("unexpected event: %+v", event)
+		}
+		previousID = event.ID
+	}
 }
 
 func waitForRoomCount(t *testing.T, roomID string, want int) {
