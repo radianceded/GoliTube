@@ -105,8 +105,59 @@ $env:GOLITUBE_TEST_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/gol
 go test -race -v -run '^TestAsyncPersistenceIntegration$' -timeout 90s .
 ```
 
-该测试使用真实 Kafka 与 MySQL，验证先入队后启动消费者、二进制与空消息、写库后未提交位点时重启重放、重复事件只保留一行。为聚焦持久化，测试将 Redis 转发替换为本地广播；真实 Redis 跨实例行为由已有集成测试覆盖。
+该测试使用真实 Kafka 与 MySQL，验证先入队后启动消费者、二进制与空消息、写库后模拟位点提交失败并重建 Kafka Reader 时的重放、重复事件只保留一行。这里没有实际杀死 Go 进程。为聚焦持久化，测试将 Redis 转发替换为本地广播；真实 Redis 跨实例行为由已有集成测试覆盖。
 
-2026-11-02：本机未安装 Docker、Kafka 或 MySQL。已通过独立于外部服务的测试与 Go 静态检查；真实 Kafka/MySQL 测试默认跳过，Compose 仅做 YAML 解析检查，尚未启动验证。上述手操步骤是待执行的验收路径，不是已完成的实验结果。
+2026-11-02 初次实现时：已通过独立于外部服务的测试与 Go 静态检查；当时未安装 Docker，真实 Kafka/MySQL 测试未运行。
+
+同日完成安装和真实集成验证：
+
+- Docker Desktop 程序位于 `F:\Docker\Desktop`，WSL 数据磁盘位于 `F:\Docker\WSL`；Kafka、MySQL 镜像和数据卷保存在该磁盘中。
+- Docker Engine 29.9.2、Kafka 4.1.0、MySQL 8.4.13；两个 Compose 服务健康，`golitube-danmaku` topic 的 3 个分区均存在。
+- 创建独立的 `golitube_test` 数据库，设置上述测试环境变量（DSN 数据库名改为 `golitube_test`），执行真实集成测试命令，`TestAsyncPersistenceIntegration` 通过，测试函数耗时 23.22 秒。
+- 验证消费者启动前 Kafka 已接收而数据库尚无记录、后续保存二进制和空消息，以及模拟位点提交失败后重放同一事件且不增加重复行。测试自己的随机 topic 和房间数据已由清理逻辑移除。
+- 测试日志保存在本机 `F:\Docker\GoliTube-tests\persistence-integration.log`。
+- 本次没有验证真实 Redis 与 Kafka/MySQL 同时参与的完整链路、实际 Go 进程崩溃恢复或运行期间 MySQL 停服恢复。上面的停库手操步骤仍是待执行实验。
+
+### 2026-11-03 完整链路本机验收
+
+使用项目实际 CLI 启动两个独立 server 进程（随机 HTTP 端口）和一个独立 persist 进程，二进制带 `-race` 编译。使用已有 WSL Redis `127.0.0.1:6379`、Kafka `127.0.0.1:19092` 和 MySQL 专用数据库 `golitube_test`，没有替换外部服务或发布函数。
+
+1. 暂不启动 persist，将两个 WebSocket 客户端分别连接到两个 server 的同一随机房间。
+2. 发送两条就绪消息，再发送中文、二进制和空消息，共 5 条事件；按成员加入的时序，检查 9 次 WebSocket 投递，均匹配消息类型和原始内容。
+3. 消息已经通过 Kafka 入队和 Redis 广播，此时查询 MySQL，该随机房间为 0 行。
+4. 启动真实 `-mode persist` 进程，轮询查询得到 5 行；逐条核对非空且互不相同的事件 ID、消息类型和完整内容，全部通过。
+5. 退出本次启动的 Go 进程，清理该随机房间的数据库记录，复查为 0 行。Kafka 公共 topic 中的验收事件按现有保留策略保留，不删除或重建开发用 topic。
+
+本机验收脚本：`F:\Docker\GoliTube-tests\verify-full-chain.go`；结果日志：`F:\Docker\GoliTube-tests\full-chain-20261103.log`；对应 server 和 worker 日志位于同一目录，以随机房间名开头。这是本机验收脚本，未纳入仓库自动测试。
+
+这次证明正常运行时可以跨实例广播并延后入库，没有测量吞吐或延迟，也没有测试网络分区、进程崩溃或端到端恰好一次投递。数据库停服恢复在下述独立实验中验证。
+
+### 2026-11-03 MySQL 停服恢复实验
+
+新增显式启用的 `TestMySQLRestartRecovery`，普通 `go test` 默认跳过。测试只停止、启动和删除自己创建并核对所有权标签的 MySQL 容器，端口选取后显式绑定，数据位于 Docker 的 F 盘数据磁盘中，不操作现有开发用 MySQL。测试结束会删除该专用容器及其匿名数据卷。
+
+```powershell
+$env:GOLITUBE_TEST_MYSQL_RESTART = '1'
+$env:GOLITUBE_TEST_REDIS_ADDR = '127.0.0.1:6379'
+$env:GOLITUBE_TEST_KAFKA_BROKERS = '127.0.0.1:19092'
+$env:GOLITUBE_TEST_DOCKER_BIN = 'F:\Docker\Desktop\resources\bin\docker.exe'
+go test -race -v -run '^TestMySQLRestartRecovery$' -timeout 180s .
+```
+
+实验使用两个独立的广播子进程、真实 Redis/Kafka、测试进程内的真实持久化消费循环，以及独立 MySQL。测试消费组与房间使用随机名称。生产者复用实际 `runServer`、Kafka 写入和 Redis 发布路径，消费者复用实际读取、重试、数据库事务和位点提交逻辑。
+
+实际结果：
+
+1. 两条就绪消息完成跨实例广播、入库和位点提交，确认消费者已工作。
+2. 正常停止专用 MySQL，再发送两条弹幕；两个客户端均收到消息，观察到真实写库失败，消费者未提交这两条事件的位点。
+3. 启动同一个 MySQL 容器，保持 Go 广播子进程和消费循环不变；两条积压消息自动入库，并成功提交位点。
+4. 原 WebSocket 连接继续收发恢复后的新消息；查询随机房间，共 5 行，事件 ID 非空且互不相同，每条内容仅出现一次。
+5. 修正测试端口设置后，`go test -race` 实验通过，测试函数耗时 15.41 秒。日志位于 `F:\Docker\GoliTube-tests\mysql-recovery-20261103.log`。
+
+首次实验曾因 Docker 自动分配的宿主机端口在 stop/start 后变化而超时。独立复现观测到端口从 45505 变为 46453；测试改为显式绑定同一空闲端口，并断言重启后地址不变。这里修复的是实验环境，未修改业务的重试策略。
+
+为什么采用这些处理：写库失败时不提交位点，让 Kafka 保留未处理任务；继续重试同一事件，避免把“广播完成”误当作“保存完成”。失败事件会阻塞该消费者的后续处理，这是当前逐条保存策略的代价。使用专用 MySQL 避免影响开发数据，等待实际失败和提交信号比固定睡眠更能判断恢复行为。
+
+实验只覆盖一次正常停服与重启，不证明数据库副本容灾、网络分区恢复、长期积压不丢失或端到端恰好一次投递。
 
 实现依据：[kafka-go 手动提交消费位点](https://github.com/segmentio/kafka-go#explicit-commits)、[MySQL 重复键处理](https://dev.mysql.com/doc/refman/8.4/en/insert-on-duplicate.html)、[Kafka 官方 Docker 示例](https://github.com/apache/kafka/blob/trunk/docker/examples/docker-compose-files/single-node/plaintext/docker-compose.yml)。

@@ -65,6 +65,7 @@ func (c *Client) writePump(interval time.Duration) {
 		err := c.Conn.SetWriteDeadline(
 			time.Now().Add(writeWait),
 		)
+		// 设置写超时，避免阻塞在慢连接上。
 		if err != nil {
 			log.Println("设置写超时失败:", err)
 			return

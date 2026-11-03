@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,12 +19,19 @@ func TestRedisInstanceProcess(t *testing.T) {
 	if os.Getenv("GOLITUBE_INSTANCE_PROCESS") != "1" {
 		t.Skip("仅由跨实例测试作为子进程启动")
 	}
-	if err := run(os.Getenv("GOLITUBE_INSTANCE_ADDR"), os.Getenv("GOLITUBE_TEST_REDIS_ADDR")); err != nil {
+	brokers := os.Getenv("GOLITUBE_INSTANCE_KAFKA_BROKERS")
+	var enqueue func(context.Context, RoomEvent) error
+	if brokers != "" {
+		writer := newEventWriter(strings.Split(brokers, ","))
+		defer writer.Close()
+		enqueue = func(ctx context.Context, event RoomEvent) error { return enqueueRoomEvent(ctx, writer, event) }
+	}
+	if err := runServer(os.Getenv("GOLITUBE_INSTANCE_ADDR"), os.Getenv("GOLITUBE_TEST_REDIS_ADDR"), enqueue); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func startTestInstance(t *testing.T, redisAddr string) string {
+func startTestInstance(t *testing.T, redisAddr string, kafkaBrokers ...string) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -32,6 +41,11 @@ func startTestInstance(t *testing.T, redisAddr string) string {
 	listener.Close()
 	command := exec.Command(os.Args[0], "-test.run=^TestRedisInstanceProcess$")
 	command.Env = append(os.Environ(), "GOLITUBE_INSTANCE_PROCESS=1", "GOLITUBE_INSTANCE_ADDR="+addr, "GOLITUBE_TEST_REDIS_ADDR="+redisAddr)
+	brokers := ""
+	if len(kafkaBrokers) > 0 {
+		brokers = kafkaBrokers[0]
+	}
+	command.Env = append(command.Env, "GOLITUBE_INSTANCE_KAFKA_BROKERS="+brokers)
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	if err := command.Start(); err != nil {
