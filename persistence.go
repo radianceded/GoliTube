@@ -58,6 +58,27 @@ func durablePublish(enqueue, publish func(context.Context, RoomEvent) error) fun
 }
 
 func openPersistenceDB(ctx context.Context, dsn string) (*sql.DB, error) {
+	db, err := newMySQLDB(dsn)
+	if err != nil {
+		return nil, err
+	}
+	setupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// schema.sql 只含静态建表语句，不开启驱动的 multiStatements。
+	for _, statement := range strings.Split(persistenceSchema, ";") {
+		if strings.TrimSpace(statement) == "" {
+			continue
+		}
+		if _, err := db.ExecContext(setupCtx, statement); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("初始化弹幕表失败: %w", err)
+		}
+	}
+	return db, nil
+}
+
+// 创建连接池不访问数据库，历史查询暂不可用时不阻止实时服务启动。
+func newMySQLDB(dsn string) (*sql.DB, error) {
 	if dsn == "" {
 		return nil, errors.New("请设置 GOLITUBE_MYSQL_DSN")
 	}
@@ -77,12 +98,6 @@ func openPersistenceDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(3 * time.Minute)
-	setupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if _, err := db.ExecContext(setupCtx, persistenceSchema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("初始化弹幕表失败: %w", err)
-	}
 	return db, nil
 }
 
@@ -99,6 +114,15 @@ func saveRoomEvent(ctx context.Context, db *sql.DB, event RoomEvent) error {
 		VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = id`,
 		event.ID, event.RoomID, event.Type, event.Data)
 	if err != nil {
+		return err
+	}
+	// 重复 ID 以原归档为准，避免重试载荷不同导致两张表内容不一致。
+	stored := RoomEvent{ID: event.ID}
+	if err := tx.QueryRowContext(ctx, "SELECT room_id, message_type, data FROM danmaku WHERE id = ?", event.ID).
+		Scan(&stored.RoomID, &stored.Type, &stored.Data); err != nil {
+		return err
+	}
+	if _, err := projectHistory(ctx, tx, stored); err != nil {
 		return err
 	}
 	return tx.Commit()

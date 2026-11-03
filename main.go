@@ -248,7 +248,7 @@ func health(w http.ResponseWriter, r *http.Request) {
 func main() {
 	addr := flag.String("addr", "localhost:8081", "HTTP 服务监听地址")
 	redisAddr := flag.String("redis-addr", "127.0.0.1:6379", "Redis 服务地址")
-	mode := flag.String("mode", "server", "运行模式：server 或 persist")
+	mode := flag.String("mode", "server", "运行模式：server、persist 或 migrate-history")
 	brokers := flag.String("kafka-brokers", "", "Kafka 地址，逗号分隔；server 留空时仅实时广播")
 	flag.Parse()
 
@@ -264,10 +264,14 @@ func main() {
 			})
 			writer.Close()
 		}
-	case "persist":
+	case "persist", "migrate-history":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
-		err = runPersistence(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"))
+		if *mode == "persist" {
+			err = runPersistence(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"))
+		} else {
+			err = runHistoryBackfill(ctx, os.Getenv("GOLITUBE_MYSQL_DSN"))
+		}
 	default:
 		err = fmt.Errorf("未知运行模式 %q", *mode)
 	}
@@ -332,6 +336,16 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 		publish = durablePublish(enqueue, publish)
 	}
 	mux.HandleFunc("/ws", handleWebSocket(publish))
+	var history func(context.Context, HistoryQuery) (HistoryPage, error)
+	if dsn := os.Getenv("GOLITUBE_MYSQL_DSN"); dsn != "" {
+		db, err := newMySQLDB(dsn)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		history = func(ctx context.Context, q HistoryQuery) (HistoryPage, error) { return queryHistory(ctx, db, q) }
+	}
+	mux.HandleFunc("/danmaku/history", handleHistory(history))
 	log.Printf("准备监听 http://%s", addr)
 
 	return http.ListenAndServe(addr, mux)

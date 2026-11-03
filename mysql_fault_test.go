@@ -263,5 +263,14 @@ func TestMySQLRestartRecovery(t *testing.T) {
 	if len(ids) != len(expected) {
 		t.Fatalf("入库 %d 条，期望 %d 条", len(ids), len(expected))
 	}
+	page, err := queryHistory(ctx, db, HistoryQuery{RoomID: room, StartMS: 0, EndMS: 2000, Limit: 10})
+	if err != nil || len(page.Items) != len(expected) {
+		t.Fatalf("恢复后历史查询条数=%d err=%v", len(page.Items), err)
+	}
+	for _, event := range page.Items {
+		if !ids[event.ID] || event.PositionMS != 1234 {
+			t.Fatalf("恢复后历史记录不一致: %+v", event)
+		}
+	}
 	t.Log("恢复后：同一消费者自动补存、提交位点；原 WebSocket 连接继续收发；5 条事件各保存一行")
 }
