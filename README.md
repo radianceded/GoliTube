@@ -18,9 +18,17 @@ Windows 使用 WSL Ubuntu 中的 Redis 时，开发期间保持一个 `wsl -d Ub
 
 客户端连接 `ws://localhost:8081/ws?room=1001` 加入房间 `1001`。使用不同的 `room` 值隔离消息；省略或留空时加入默认房间 `lobby`。房间名去除首尾空白后最多 128 字节；一个连接固定属于一个房间，换房需重新连接。
 
+`/ws` 现在使用正式 JSON 弹幕协议，替换原来的任意文本、二进制回声。发送示例：
+
+```json
+{"content":"你好","position_ms":12500,"color":"#ffffff"}
+```
+
+服务端校验内容、播放时间与颜色，生成消息 ID 和接收时间，同一份结构化事件用于广播和保存。非法输入只向发送者回复错误，不进入发布链路。字段、错误格式与兼容范围见 [弹幕协议 v1](docs/danmaku-protocol.md)。登录鉴权、视频实体及历史查询尚未实现。
+
 运行 `go test ./...` 验证同房间并发广播、跨房间隔离、断开与空房间回收，以及回收后重新加入。运行 `go test -race ./...` 检查数据竞争。
 
-真实 Redis 测试默认跳过。在 PowerShell 中设置 `$env:GOLITUBE_TEST_REDIS_ADDR = '127.0.0.1:6379'` 后运行 `go test -race -v -timeout 30s ./...`，会额外验证事件接收过滤和两个独立进程的同房间双向广播、二进制消息与房间隔离。普通单实例测试注入本地转发函数，不需要 Redis；它们不能代替真实 Redis 测试。
+真实 Redis 测试默认跳过。在 PowerShell 中设置 `$env:GOLITUBE_TEST_REDIS_ADDR = '127.0.0.1:6379'` 后运行 `go test -race -v -timeout 30s ./...`，会额外验证事件接收过滤和两个独立进程的正式 JSON 弹幕双向广播、中文内容与房间隔离。底层传输测试另保留二进制字节验证。普通单实例测试注入本地转发函数，不需要 Redis；它们不能代替真实 Redis 测试。
 
 停服恢复实验单独启用：设置 `$env:GOLITUBE_TEST_REDIS_RESTART = '1'`，运行 `go test -race -v -run '^TestRedisRestartRecovery$' -timeout 60s .`。测试启动专用 Redis 并只停止该实例，不操作现有的 6379；Windows 要求 WSL Ubuntu 已安装 `redis-server`，临时目录应位于可从 WSL 访问的本地磁盘。
 

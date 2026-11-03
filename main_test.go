@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,9 +22,20 @@ func localPublish(_ context.Context, event RoomEvent) error {
 	return nil
 }
 
-func TestMessageIdentity(t *testing.T) {
+// 只在传输层测试中注入原样转发；真实 /ws 固定使用 decodeDanmaku。
+func rawTestEvent(room string, kind int, data []byte) (RoomEvent, error) {
+	return RoomEvent{ID: rand.Text(), RoomID: room, Type: kind, Data: data}, nil
+}
+
+func handleTransportWebSocket(publish func(context.Context, RoomEvent) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serveWebSocketWithDecoder(w, r, pingInterval, pongWait, publish, rawTestEvent)
+	}
+}
+
+func TestTransportEventRoundTrip(t *testing.T) {
 	events := make(chan RoomEvent, 2)
-	server := httptest.NewServer(handleWebSocket(func(ctx context.Context, event RoomEvent) error {
+	server := httptest.NewServer(handleTransportWebSocket(func(ctx context.Context, event RoomEvent) error {
 		// 模拟事件经消息队列编码、解码后仍保留同一 ID。
 		payload, err := json.Marshal(event)
 		if err != nil {
@@ -84,7 +96,7 @@ func waitForRoomCount(t *testing.T, roomID string, want int) {
 }
 
 func TestBroadcast(t *testing.T) {
-	server := httptest.NewServer(handleWebSocket(localPublish))
+	server := httptest.NewServer(handleTransportWebSocket(localPublish))
 	defer server.Close()
 	defer waitForRoomCount(t, "lobby", 0)
 
@@ -156,7 +168,7 @@ func TestBroadcast(t *testing.T) {
 }
 
 func TestRoomIsolationAndRejoin(t *testing.T) {
-	server := httptest.NewServer(handleWebSocket(localPublish))
+	server := httptest.NewServer(handleTransportWebSocket(localPublish))
 	t.Cleanup(server.Close)
 	t.Cleanup(func() {
 		waitForRoomCount(t, "red", 0)
@@ -285,7 +297,7 @@ func TestFullQueueDisconnects(t *testing.T) {
 func TestRoomNameLimit(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/ws?room="+strings.Repeat("a", 129), nil)
 	response := httptest.NewRecorder()
-	handleWebSocket(localPublish)(response, request)
+	handleTransportWebSocket(localPublish)(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
 	}
@@ -298,7 +310,7 @@ func TestHeartbeat(t *testing.T) {
 		t.Run(fmt.Sprintf("reply=%v", reply), func(t *testing.T) {
 			roomID := fmt.Sprintf("heartbeat-%v", reply)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				serveWebSocket(w, r, interval, wait, localPublish)
+				serveWebSocketWithDecoder(w, r, interval, wait, localPublish, rawTestEvent)
 			}))
 			t.Cleanup(server.Close)
 			t.Cleanup(func() { waitForRoomCount(t, roomID, 0) })
@@ -399,7 +411,7 @@ func TestPublishFailureClosesConnection(t *testing.T) {
 	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.WriteMessage(websocket.TextMessage, []byte("will fail")); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, testDanmakuPayload(t, "will fail")); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err = conn.ReadMessage()

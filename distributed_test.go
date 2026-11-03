@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -92,7 +93,7 @@ func TestCrossInstanceBroadcast(t *testing.T) {
 		if err := conn.SetWriteDeadline(time.Now().Add(3 * time.Second)); err != nil {
 			t.Fatal(err)
 		}
-		if err := conn.WriteMessage(kind, body); err != nil {
+		if err := conn.WriteMessage(kind, testDanmakuPayload(t, string(body))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -102,7 +103,9 @@ func TestCrossInstanceBroadcast(t *testing.T) {
 			t.Fatal(err)
 		}
 		gotKind, gotBody, err := conn.ReadMessage()
-		if err != nil || gotKind != kind || string(gotBody) != string(body) {
+		var event Danmaku
+		decodeErr := json.Unmarshal(gotBody, &event)
+		if err != nil || decodeErr != nil || gotKind != kind || event.Type != "danmaku" || event.ID == "" || event.Content != string(body) || event.PositionMS != 1234 {
 			t.Fatalf("收到 type=%d data=%q err=%v，期望 type=%d data=%q", gotKind, gotBody, err, kind, body)
 		}
 	}
@@ -122,9 +125,9 @@ func TestCrossInstanceBroadcast(t *testing.T) {
 	send(a, websocket.TextMessage, []byte("A to B"))
 	receive(a, websocket.TextMessage, []byte("A to B"))
 	receive(b, websocket.TextMessage, []byte("A to B"))
-	send(b, websocket.BinaryMessage, []byte{0, 255})
-	receive(a, websocket.BinaryMessage, []byte{0, 255})
-	receive(b, websocket.BinaryMessage, []byte{0, 255})
+	send(b, websocket.TextMessage, []byte("中文弹幕"))
+	receive(a, websocket.TextMessage, []byte("中文弹幕"))
+	receive(b, websocket.TextMessage, []byte("中文弹幕"))
 	send(c, websocket.TextMessage, []byte("only C"))
 	receive(c, websocket.TextMessage, []byte("only C"))
 	send(a, websocket.TextMessage, []byte("after C"))

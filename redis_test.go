@@ -29,7 +29,7 @@ func TestConsumeRoomEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(handleWebSocket(localPublish))
+	server := httptest.NewServer(handleTransportWebSocket(localPublish))
 	defer server.Close()
 	roomID := fmt.Sprintf("redis-test-%d", time.Now().UnixNano())
 	defer waitForRoomCount(t, roomID, 0)

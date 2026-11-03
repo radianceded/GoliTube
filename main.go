@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
@@ -122,12 +123,23 @@ func handleWebSocket(publish func(context.Context, RoomEvent) error) http.Handle
 
 // 显式传入心跳时间和发布函数，测试可缩短期限并独立验证本地行为。
 func serveWebSocket(w http.ResponseWriter, r *http.Request, interval, wait time.Duration, publish func(context.Context, RoomEvent) error) {
+	serveWebSocketWithDecoder(w, r, interval, wait, publish, decodeDanmaku)
+}
+
+func serveWebSocketWithDecoder(w http.ResponseWriter, r *http.Request, interval, wait time.Duration,
+	publish func(context.Context, RoomEvent) error,
+	decode func(string, int, []byte) (RoomEvent, error),
+) {
 	roomID := strings.TrimSpace(r.URL.Query().Get("room"))
 	if roomID == "" {
 		roomID = "lobby"
 	}
 	if len(roomID) > 128 {
 		http.Error(w, "room name must be at most 128 bytes", http.StatusBadRequest)
+		return
+	}
+	if !utf8.ValidString(roomID) {
+		http.Error(w, "room name must be UTF-8", http.StatusBadRequest)
 		return
 	}
 
@@ -192,15 +204,29 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, interval, wait time.
 			return
 		}
 
-		log.Println("消息类型:", messageType, "消息内容:", string(message))
+		event, err := decode(roomID, messageType, message)
+		if err != nil {
+			payload, _ := json.Marshal(ProtocolError{Type: "error", Code: "invalid_danmaku", Message: err.Error()})
+			// 错误仅回复发送者，也经过同一个 writePump，避免并发写连接。
+			// 与移除成员、关闭 Send 使用同一把锁，避免向已关闭的队列发送。
+			roomsMu.Lock()
+			sent := false
+			if _, exists := rooms[roomID][conn]; exists {
+				select {
+				case client.Send <- Message{Type: websocket.TextMessage, Data: payload}:
+					sent = true
+				default:
+				}
+			}
+			roomsMu.Unlock()
+			if !sent {
+				return
+			}
+			continue
+		}
 
 		publishCtx, cancelPublish := context.WithTimeout(r.Context(), 3*time.Second)
-		err = publish(publishCtx, RoomEvent{
-			ID:     rand.Text(),
-			RoomID: roomID,
-			Type:   messageType,
-			Data:   message,
-		})
+		err = publish(publishCtx, event)
 		cancelPublish()
 		if err != nil {
 			log.Println("发布弹幕失败，关闭连接:", err)

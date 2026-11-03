@@ -2,6 +2,8 @@
 
 ## 消息链路
 
+当前客户端发送和接收格式见 [弹幕协议 v1](danmaku-protocol.md)。`/ws` 不再原样转发任意文本或二进制；本文早期实验中的二进制、空消息属于协议升级前的传输层验证，保留为历史记录。
+
 ```text
 浏览器 ws.send
   → Go 读取，生成事件 ID
@@ -48,7 +50,7 @@ go run . -mode persist -kafka-brokers 127.0.0.1:19092
 ## 手操验证
 
 1. 先启动服务端，暂不启动持久化消费者。
-2. Postman 连接 `ws://localhost:8081/ws?room=1001`，发送 `hello`。应能收到回声，消息此时进入 Kafka。
+2. Postman 连接 `ws://localhost:8081/ws?room=1001`，发送 `{"content":"hello","position_ms":12500}`。应收到带 ID 的 `danmaku` JSON，消息此时进入 Kafka。
 3. 启动消费者，执行以下命令检查数据库，应看到对应房间和内容。
 
 ```powershell
@@ -105,7 +107,7 @@ $env:GOLITUBE_TEST_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/gol
 go test -race -v -run '^TestAsyncPersistenceIntegration$' -timeout 90s .
 ```
 
-该测试使用真实 Kafka 与 MySQL，验证先入队后启动消费者、二进制与空消息、写库后模拟位点提交失败并重建 Kafka Reader 时的重放、重复事件只保留一行。这里没有实际杀死 Go 进程。为聚焦持久化，测试将 Redis 转发替换为本地广播；真实 Redis 跨实例行为由已有集成测试覆盖。
+该测试使用真实 Kafka 与 MySQL，验证先入队后启动消费者、二进制与空消息、写库后模拟位点提交失败并重建 Kafka Reader 时的重放、重复事件只保留一行。这里没有实际杀死 Go 进程。为聚焦持久化底层行为，测试注入原样解码器，将 Redis 转发替换为本地广播；它不代表 `/ws` 接受二进制或空弹幕，正式协议和跨实例行为由其他测试覆盖。
 
 2026-11-02 初次实现时：已通过独立于外部服务的测试与 Go 静态检查；当时未安装 Docker，真实 Kafka/MySQL 测试未运行。
 
@@ -159,5 +161,13 @@ go test -race -v -run '^TestMySQLRestartRecovery$' -timeout 180s .
 为什么采用这些处理：写库失败时不提交位点，让 Kafka 保留未处理任务；继续重试同一事件，避免把“广播完成”误当作“保存完成”。失败事件会阻塞该消费者的后续处理，这是当前逐条保存策略的代价。使用专用 MySQL 避免影响开发数据，等待实际失败和提交信号比固定睡眠更能判断恢复行为。
 
 实验只覆盖一次正常停服与重启，不证明数据库副本容灾、网络分区恢复、长期积压不丢失或端到端恰好一次投递。
+
+### 正式弹幕协议接入后的回归
+
+2026-11-03 将真实 `/ws` 切换为 [JSON 弹幕协议](danmaku-protocol.md)，原样解码仅在传输层测试中使用。`go test -race -timeout 30s ./...`、`go vet ./...` 通过。
+
+随后使用真实 Redis/Kafka 和专用 MySQL 运行 `TestCrossInstanceBroadcast`、`TestMySQLRestartRecovery`，均通过；后者耗时 15.14 秒，检查数据库 JSON 的 ID 与主键一致、房间和 `position_ms=1234` 保留、5 条事件内容各出现一次。日志：`F:\Docker\GoliTube-tests\danmaku-protocol-integration-20261103.log`。
+
+另运行真实 Redis 的 `TestConsumeRoomEvents` 与 `TestRedisRestartRecovery`，均通过；日志：`F:\Docker\GoliTube-tests\danmaku-protocol-redis-20261103.log`。未重复早期的本机临时验收脚本，该脚本仍使用旧的原样消息格式，不能直接验收当前 `/ws`。
 
 实现依据：[kafka-go 手动提交消费位点](https://github.com/segmentio/kafka-go#explicit-commits)、[MySQL 重复键处理](https://dev.mysql.com/doc/refman/8.4/en/insert-on-duplicate.html)、[Kafka 官方 Docker 示例](https://github.com/apache/kafka/blob/trunk/docker/examples/docker-compose-files/single-node/plaintext/docker-compose.yml)。

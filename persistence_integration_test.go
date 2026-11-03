@@ -75,7 +75,7 @@ func TestAsyncPersistenceIntegration(t *testing.T) {
 	writer.Topic = room
 	defer writer.Close()
 	accepted := make(chan RoomEvent, 1)
-	server := httptest.NewServer(handleWebSocket(durablePublish(func(ctx context.Context, event RoomEvent) error {
+	server := httptest.NewServer(handleTransportWebSocket(durablePublish(func(ctx context.Context, event RoomEvent) error {
 		err := enqueueRoomEvent(ctx, writer, event)
 		if err == nil {
 			accepted <- event

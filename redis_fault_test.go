@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -122,7 +123,7 @@ func TestRedisRestartRecovery(t *testing.T) {
 		if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
 			t.Fatal(err)
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(body)); err != nil {
+		if err := conn.WriteMessage(websocket.TextMessage, testDanmakuPayload(t, body)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -132,7 +133,9 @@ func TestRedisRestartRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		kind, data, err := conn.ReadMessage()
-		if err != nil || kind != websocket.TextMessage || string(data) != body {
+		var event Danmaku
+		decodeErr := json.Unmarshal(data, &event)
+		if err != nil || decodeErr != nil || kind != websocket.TextMessage || event.Type != "danmaku" || event.Content != body || event.RoomID != roomID {
 			t.Fatalf("收到 %q type=%d err=%v，期望 %q", data, kind, err, body)
 		}
 	}

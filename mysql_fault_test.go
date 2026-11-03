@@ -127,7 +127,11 @@ func TestMySQLRestartRecovery(t *testing.T) {
 					return err
 				}
 				if event.RoomID == room {
-					committed <- string(event.Data)
+					var danmaku Danmaku
+					if err := json.Unmarshal(event.Data, &danmaku); err != nil {
+						return err
+					}
+					committed <- danmaku.Content
 				}
 			}
 			return nil
@@ -157,7 +161,7 @@ func TestMySQLRestartRecovery(t *testing.T) {
 		if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 			t.Fatal(err)
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(value)); err != nil {
+		if err := conn.WriteMessage(websocket.TextMessage, testDanmakuPayload(t, value)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -167,7 +171,9 @@ func TestMySQLRestartRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		kind, body, err := conn.ReadMessage()
-		if err != nil || kind != websocket.TextMessage || string(body) != want {
+		var event Danmaku
+		decodeErr := json.Unmarshal(body, &event)
+		if err != nil || decodeErr != nil || kind != websocket.TextMessage || event.Type != "danmaku" || event.Content != want || event.RoomID != room {
 			t.Fatalf("收到 kind=%d body=%q err=%v，期望 %q", kind, body, err, want)
 		}
 	}
@@ -241,11 +247,15 @@ func TestMySQLRestartRecovery(t *testing.T) {
 		if err := rows.Scan(&id, &body); err != nil {
 			t.Fatal(err)
 		}
-		seen, exists := expected[body]
-		if !exists || seen || id == "" || ids[id] {
+		var event Danmaku
+		if err := json.Unmarshal([]byte(body), &event); err != nil {
+			t.Fatal(err)
+		}
+		seen, exists := expected[event.Content]
+		if !exists || seen || id == "" || ids[id] || event.ID != id || event.RoomID != room || event.PositionMS != 1234 {
 			t.Fatalf("意外或重复记录: id=%q body=%q", id, body)
 		}
-		expected[body], ids[id] = true, true
+		expected[event.Content], ids[id] = true, true
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
