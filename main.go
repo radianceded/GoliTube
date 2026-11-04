@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -337,15 +338,18 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 	}
 	mux.HandleFunc("/ws", handleWebSocket(publish))
 	var history func(context.Context, HistoryQuery) (HistoryPage, error)
+	var appDB *sql.DB
 	if dsn := os.Getenv("GOLITUBE_MYSQL_DSN"); dsn != "" {
 		db, err := newMySQLDB(dsn)
 		if err != nil {
 			return err
 		}
 		defer db.Close()
+		appDB = db
 		history = func(ctx context.Context, q HistoryQuery) (HistoryPage, error) { return queryHistory(ctx, db, q) }
 	}
 	mux.HandleFunc("/danmaku/history", handleHistory(history))
+	mux.Handle("/auth/", &authHandler{db: appDB, rdb: rdb, namespace: "golitube", secureCookie: os.Getenv("GOLITUBE_COOKIE_SECURE") == "1"})
 	log.Printf("准备监听 http://%s", addr)
 
 	return http.ListenAndServe(addr, mux)

@@ -7,6 +7,13 @@ CREATE TABLE IF NOT EXISTS danmaku (
     INDEX room_history (room_id, stored_at, id)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS users (
+    id VARBINARY(128) NOT NULL PRIMARY KEY,
+    username VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL UNIQUE,
+    password_hash VARBINARY(60) NOT NULL,
+    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS danmaku_history (
     id VARBINARY(128) NOT NULL PRIMARY KEY,
     room_id VARBINARY(128) NOT NULL,

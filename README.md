@@ -24,7 +24,9 @@ Windows 使用 WSL Ubuntu 中的 Redis 时，开发期间保持一个 `wsl -d Ub
 {"content":"你好","position_ms":12500,"color":"#ffffff"}
 ```
 
-服务端校验内容、播放时间与颜色，生成消息 ID 和接收时间，同一份结构化事件用于广播和保存。非法输入只向发送者回复错误，不进入发布链路。字段、错误格式与兼容范围见 [弹幕协议 v1](docs/danmaku-protocol.md)。登录鉴权和视频实体尚未实现。
+服务端校验内容、播放时间与颜色，生成消息 ID 和接收时间，同一份结构化事件用于广播和保存。非法输入只向发送者回复错误，不进入发布链路。字段、错误格式与兼容范围见 [弹幕协议 v1](docs/danmaku-protocol.md)。视频实体和弹幕发送鉴权尚未实现。
+
+已增加注册、登录、当前身份查询和退出接口，使用 bcrypt 密码哈希及 Redis/Cookie 会话，见 [账号流程](docs/accounts.md)。当前 `/ws` 仍可匿名发送，登录会话尚未接入弹幕链路。
 
 历史弹幕接口：`GET /danmaku/history?room=1001&start_ms=0&end_ms=60000`，支持按播放时间分段和游标分页。server 与 persist 需配置相同的 `GOLITUBE_MYSQL_DSN`；首次升级执行 `go run . -mode migrate-history` 初始化并回填旧的正式 JSON 弹幕。参数、启动和手操步骤见 [历史弹幕查询](docs/history-query.md)。
 
