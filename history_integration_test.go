@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/gorilla/websocket"
 )
 
@@ -22,6 +23,10 @@ func TestHistoryIntegration(t *testing.T) {
 	if dsn == "" {
 		t.Skip("设置 GOLITUBE_TEST_MYSQL_DSN 启用真实 MySQL 历史查询测试")
 	}
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil || !strings.HasSuffix(cfg.DBName, "_test") {
+		t.Fatal("此测试只允许在名称以 _test 结尾的专用库运行")
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	db, err := openPersistenceDB(ctx, dsn)
@@ -29,10 +34,6 @@ func TestHistoryIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	var database string
-	if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&database); err != nil || !strings.HasSuffix(database, "_test") {
-		t.Fatal("此测试只允许在名称以 _test 结尾的专用库运行")
-	}
 	room := "history-" + rand.Text()
 	defer func() {
 		cleanupCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
