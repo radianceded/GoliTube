@@ -2,6 +2,10 @@
 
 验证日期：2026-10-31（Asia/Shanghai）。
 
+**版本说明（2026-11-05）：** 以下原始结果来自尚无发送鉴权的版本。接入会话后，Redis 停服会先使身份检查失败，向发送者回复 `auth_unavailable`，不会进入发布链路；连接仍可保留。专用 Redis 关闭持久化，重启会丢失会话，旧连接仍能接收公开弹幕，但发送需要重新登录并重连。`TestRedisRestartRecovery` 已按此行为更新，不再要求所有 Redis 故障都关闭连接。
+
+2026-11-05 已用竞态检测重新通过更新后的测试，测试函数耗时 5.43 秒。日志：`F:\Docker\GoliTube-tests\redis-auth-recovery-20261105.log`。只重启测试自己创建的专用 Redis，未停止开发用 6379。
+
 ## 环境与执行方式
 
 Windows Go 后端，Go 1.26.5、go-redis v9.23.0；Redis 7.0.15 在 WSL Ubuntu 中运行。测试以独立配置、随机端口启动专用 Redis，关闭 RDB/AOF 持久化；两个 Go 子进程拥有独立内存。停服前核对 Redis 的配置路径，只向测试自己的 Redis 发送 SHUTDOWN NOSAVE，结束时回收测试进程。

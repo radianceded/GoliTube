@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -116,17 +117,29 @@ func broadcast(roomID string, messageType int, message []byte) {
 	}
 }
 
-func handleWebSocket(publish func(context.Context, RoomEvent) error) http.HandlerFunc {
+func handleWebSocket(publish func(context.Context, RoomEvent) error, auth *authHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveWebSocket(w, r, pingInterval, pongWait, publish)
+		// Cookie 固定来自本次握手；每次发送重新查 Redis，使退出、过期和轮换生效。
+		serveWebSocketWithDecoder(w, r, pingInterval, pongWait, publish, func(room string, kind int, data []byte) (RoomEvent, error) {
+			if auth == nil || auth.rdb == nil {
+				return RoomEvent{}, &ProtocolError{Type: "error", Code: "auth_unavailable", Message: "账号服务暂不可用"}
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			user, err := auth.currentUser(ctx, r)
+			cancel()
+			if errors.Is(err, redis.Nil) {
+				return RoomEvent{}, &ProtocolError{Type: "error", Code: "unauthenticated", Message: "请先登录，并重新建立弹幕连接"}
+			}
+			if err != nil {
+				log.Println("弹幕发送身份查询失败:", err)
+				return RoomEvent{}, &ProtocolError{Type: "error", Code: "auth_unavailable", Message: "账号服务暂不可用"}
+			}
+			return decodeDanmaku(room, kind, data, user.ID)
+		})
 	}
 }
 
-// 显式传入心跳时间和发布函数，测试可缩短期限并独立验证本地行为。
-func serveWebSocket(w http.ResponseWriter, r *http.Request, interval, wait time.Duration, publish func(context.Context, RoomEvent) error) {
-	serveWebSocketWithDecoder(w, r, interval, wait, publish, decodeDanmaku)
-}
-
+// 显式传入解码函数和心跳期限，便于独立测试传输与业务逻辑。
 func serveWebSocketWithDecoder(w http.ResponseWriter, r *http.Request, interval, wait time.Duration,
 	publish func(context.Context, RoomEvent) error,
 	decode func(string, int, []byte) (RoomEvent, error),
@@ -207,7 +220,12 @@ func serveWebSocketWithDecoder(w http.ResponseWriter, r *http.Request, interval,
 
 		event, err := decode(roomID, messageType, message)
 		if err != nil {
-			payload, _ := json.Marshal(ProtocolError{Type: "error", Code: "invalid_danmaku", Message: err.Error()})
+			failure := &ProtocolError{Type: "error", Code: "invalid_danmaku", Message: err.Error()}
+			var protocolError *ProtocolError
+			if errors.As(err, &protocolError) {
+				failure = protocolError
+			}
+			payload, _ := json.Marshal(failure)
 			// 错误仅回复发送者，也经过同一个 writePump，避免并发写连接。
 			// 与移除成员、关闭 Send 使用同一把锁，避免向已关闭的队列发送。
 			roomsMu.Lock()
@@ -336,7 +354,6 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 	if enqueue != nil {
 		publish = durablePublish(enqueue, publish)
 	}
-	mux.HandleFunc("/ws", handleWebSocket(publish))
 	var history func(context.Context, HistoryQuery) (HistoryPage, error)
 	var appDB *sql.DB
 	if dsn := os.Getenv("GOLITUBE_MYSQL_DSN"); dsn != "" {
@@ -349,7 +366,9 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 		history = func(ctx context.Context, q HistoryQuery) (HistoryPage, error) { return queryHistory(ctx, db, q) }
 	}
 	mux.HandleFunc("/danmaku/history", handleHistory(history))
-	mux.Handle("/auth/", &authHandler{db: appDB, rdb: rdb, namespace: "golitube", secureCookie: os.Getenv("GOLITUBE_COOKIE_SECURE") == "1"})
+	auth := &authHandler{db: appDB, rdb: rdb, namespace: "golitube", secureCookie: os.Getenv("GOLITUBE_COOKIE_SECURE") == "1"}
+	mux.Handle("/auth/", auth)
+	mux.HandleFunc("/ws", handleWebSocket(publish, auth))
 	log.Printf("准备监听 http://%s", addr)
 
 	return http.ListenAndServe(addr, mux)

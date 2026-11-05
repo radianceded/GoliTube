@@ -46,6 +46,9 @@ func TestHistoryIntegration(t *testing.T) {
 	}()
 	makeEvent := func(suffix string, position int64) RoomEvent {
 		model := Danmaku{Type: "danmaku", ID: room + "-" + suffix, RoomID: room, Content: "弹幕 " + suffix, PositionMS: position, Color: "#ffffff", CreatedAtMS: time.Now().UnixMilli()}
+		if suffix == "1" || suffix == "4" {
+			model.UserID = room + "-author"
+		}
 		data, err := json.Marshal(model)
 		if err != nil {
 			t.Fatal(err)
@@ -92,6 +95,10 @@ func TestHistoryIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	conflict := makeEvent("1", 1)
+	var conflictModel Danmaku
+	json.Unmarshal(conflict.Data, &conflictModel)
+	conflictModel.UserID = "must-not-replace-original-author"
+	conflict.Data, _ = json.Marshal(conflictModel)
 	if err := saveRoomEvent(ctx, db, conflict); err != nil {
 		t.Fatal(err)
 	}

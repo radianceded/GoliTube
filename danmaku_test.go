@@ -23,9 +23,18 @@ func testDanmakuPayload(t *testing.T, content string) []byte {
 	return payload
 }
 
+// 只隔离测试协议；真实 /ws 必须通过 Redis 会话检查，不能使用此测试入口。
+func handleProtocolWebSocket(publish func(context.Context, RoomEvent) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serveWebSocketWithDecoder(w, r, pingInterval, pongWait, publish, func(room string, kind int, data []byte) (RoomEvent, error) {
+			return decodeDanmaku(room, kind, data, "protocol-test-user")
+		})
+	}
+}
+
 func TestDanmakuProtocol(t *testing.T) {
 	accepted := make(chan RoomEvent, 8)
-	server := httptest.NewServer(handleWebSocket(func(ctx context.Context, event RoomEvent) error {
+	server := httptest.NewServer(handleProtocolWebSocket(func(ctx context.Context, event RoomEvent) error {
 		accepted <- event
 		return localPublish(ctx, event)
 	}))
@@ -87,6 +96,7 @@ func TestDanmakuProtocol(t *testing.T) {
 		{"invalid-color", websocket.TextMessage, []byte(`{"content":"hi","position_ms":0,"color":"red"}`)},
 		{"forged-room", websocket.TextMessage, []byte(`{"content":"hi","position_ms":0,"room_id":"another-room"}`)},
 		{"forged-id", websocket.TextMessage, []byte(`{"content":"hi","position_ms":0,"id":"forged"}`)},
+		{"forged-user", websocket.TextMessage, []byte(`{"content":"hi","position_ms":0,"user_id":"forged"}`)},
 		{"forged-time", websocket.TextMessage, []byte(`{"content":"hi","position_ms":0,"created_at_ms":1}`)},
 		{"trailing-object", websocket.TextMessage, []byte(`{"content":"hi","position_ms":0} {}`)},
 		{"trailing-garbage", websocket.TextMessage, []byte(`{"content":"hi","position_ms":0} bad`)},
@@ -120,7 +130,7 @@ func TestDanmakuProtocol(t *testing.T) {
 		if err := json.Unmarshal(body, &received); err != nil {
 			t.Fatal(err)
 		}
-		if received.Type != "danmaku" || received.ID == "" || received.ID == previousID || received.RoomID != room ||
+		if received.Type != "danmaku" || received.ID == "" || received.ID == previousID || received.RoomID != room || received.UserID != "protocol-test-user" ||
 			received.Content != strings.TrimSpace(content) || received.PositionMS != position || received.Color != "#aabbcc" ||
 			received.CreatedAtMS < started || received.CreatedAtMS > time.Now().UnixMilli() {
 			t.Fatalf("unexpected event: %+v", received)
@@ -144,7 +154,7 @@ func TestDanmakuProtocol(t *testing.T) {
 
 func TestDanmakuFrameLimit(t *testing.T) {
 	accepted := make(chan RoomEvent, 1)
-	server := httptest.NewServer(handleWebSocket(func(_ context.Context, event RoomEvent) error { accepted <- event; return nil }))
+	server := httptest.NewServer(handleProtocolWebSocket(func(_ context.Context, event RoomEvent) error { accepted <- event; return nil }))
 	defer server.Close()
 	const room = "oversized-protocol"
 	defer waitForRoomCount(t, room, 0)

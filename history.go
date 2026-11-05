@@ -113,7 +113,7 @@ func handleHistory(query func(context.Context, HistoryQuery) (HistoryPage, error
 }
 
 func queryHistory(ctx context.Context, db *sql.DB, q HistoryQuery) (HistoryPage, error) {
-	statement := `SELECT id, room_id, content, position_ms, color, created_at_ms
+	statement := `SELECT id, room_id, content, position_ms, color, created_at_ms, user_id
 		FROM danmaku_history WHERE room_id = ? AND position_ms >= ? AND position_ms < ?`
 	args := []any{q.RoomID, q.StartMS, q.EndMS}
 	if q.AfterID != "" {
@@ -130,9 +130,11 @@ func queryHistory(ctx context.Context, db *sql.DB, q HistoryQuery) (HistoryPage,
 	page := HistoryPage{Items: make([]Danmaku, 0, q.Limit)}
 	for rows.Next() {
 		event := Danmaku{Type: "danmaku"}
-		if err := rows.Scan(&event.ID, &event.RoomID, &event.Content, &event.PositionMS, &event.Color, &event.CreatedAtMS); err != nil {
+		var userID sql.NullString
+		if err := rows.Scan(&event.ID, &event.RoomID, &event.Content, &event.PositionMS, &event.Color, &event.CreatedAtMS, &userID); err != nil {
 			return HistoryPage{}, err
 		}
+		event.UserID = userID.String
 		page.Items = append(page.Items, event)
 	}
 	if err := rows.Err(); err != nil {
@@ -153,6 +155,7 @@ func historyDanmaku(event RoomEvent) (Danmaku, bool) {
 		Type        string `json:"type"`
 		ID          string `json:"id"`
 		RoomID      string `json:"room_id"`
+		UserID      string `json:"user_id"`
 		Content     string `json:"content"`
 		PositionMS  *int64 `json:"position_ms"`
 		Color       string `json:"color"`
@@ -161,6 +164,7 @@ func historyDanmaku(event RoomEvent) (Danmaku, bool) {
 	if event.Type != websocket.TextMessage || !utf8.Valid(event.Data) || json.Unmarshal(event.Data, &stored) != nil ||
 		stored.Type != "danmaku" || stored.ID == "" || len(stored.ID) > 128 || stored.ID != event.ID ||
 		stored.RoomID == "" || len(stored.RoomID) > 128 || !utf8.ValidString(stored.RoomID) || stored.RoomID != event.RoomID ||
+		len(stored.UserID) > 128 || !utf8.ValidString(stored.UserID) ||
 		stored.PositionMS == nil || *stored.PositionMS < 0 || stored.CreatedAtMS <= 0 ||
 		strings.TrimSpace(stored.Content) != stored.Content || utf8.RuneCountInString(stored.Content) < 1 ||
 		utf8.RuneCountInString(stored.Content) > maxDanmakuCharacters || !colorPattern.MatchString(stored.Color) {
@@ -171,7 +175,7 @@ func historyDanmaku(event RoomEvent) (Danmaku, bool) {
 			return Danmaku{}, false
 		}
 	}
-	return Danmaku{Type: stored.Type, ID: stored.ID, RoomID: stored.RoomID, Content: stored.Content,
+	return Danmaku{Type: stored.Type, ID: stored.ID, RoomID: stored.RoomID, UserID: stored.UserID, Content: stored.Content,
 		PositionMS: *stored.PositionMS, Color: stored.Color, CreatedAtMS: stored.CreatedAtMS}, true
 }
 
@@ -180,9 +184,10 @@ func projectHistory(ctx context.Context, tx *sql.Tx, event RoomEvent) (bool, err
 	if !ok {
 		return false, nil
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO danmaku_history (id,room_id,content,position_ms,color,created_at_ms)
-		VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id`, danmaku.ID, danmaku.RoomID, danmaku.Content,
-		danmaku.PositionMS, danmaku.Color, danmaku.CreatedAtMS)
+	author := sql.NullString{String: danmaku.UserID, Valid: danmaku.UserID != ""}
+	_, err := tx.ExecContext(ctx, `INSERT INTO danmaku_history (id,room_id,content,position_ms,color,created_at_ms,user_id)
+		VALUES (?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE user_id=COALESCE(user_id,?)`, danmaku.ID, danmaku.RoomID, danmaku.Content,
+		danmaku.PositionMS, danmaku.Color, danmaku.CreatedAtMS, author, author)
 	return true, err
 }
 

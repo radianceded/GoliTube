@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,7 +14,29 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 )
+
+// Redis 通信/故障测试直接准备独立会话；HTTP 注册登录另有端到端集成测试。
+func testSessionHeader(t *testing.T, addr string) http.Header {
+	t.Helper()
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	t.Cleanup(func() { rdb.Close() })
+	auth := &authHandler{rdb: rdb, namespace: "golitube"}
+	token := rand.Text()
+	payload, _ := json.Marshal(User{ID: rand.Text(), Username: "integration_user"})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := rdb.Set(ctx, auth.sessionKey(token), payload, time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		rdb.Del(ctx, auth.sessionKey(token))
+	})
+	return http.Header{"Cookie": {sessionCookie + "=" + token}}
+}
 
 // 使用测试二进制启动真实子进程，使两个实例拥有独立的 rooms 和 roomsMu。
 func TestRedisInstanceProcess(t *testing.T) {
@@ -78,10 +101,11 @@ func TestCrossInstanceBroadcast(t *testing.T) {
 		t.Skip("设置 GOLITUBE_TEST_REDIS_ADDR 显式启用真实 Redis 测试")
 	}
 	first, second := startTestInstance(t, redisAddr), startTestInstance(t, redisAddr)
+	headers := testSessionHeader(t, redisAddr)
 	roomID := fmt.Sprintf("distributed-%d", time.Now().UnixNano())
 	dial := func(addr, room string) *websocket.Conn {
 		t.Helper()
-		conn, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws?room="+room, nil)
+		conn, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws?room="+room, headers)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -105,7 +129,7 @@ func TestCrossInstanceBroadcast(t *testing.T) {
 		gotKind, gotBody, err := conn.ReadMessage()
 		var event Danmaku
 		decodeErr := json.Unmarshal(gotBody, &event)
-		if err != nil || decodeErr != nil || gotKind != kind || event.Type != "danmaku" || event.ID == "" || event.Content != string(body) || event.PositionMS != 1234 {
+		if err != nil || decodeErr != nil || gotKind != kind || event.Type != "danmaku" || event.ID == "" || event.UserID == "" || event.Content != string(body) || event.PositionMS != 1234 {
 			t.Fatalf("收到 type=%d data=%q err=%v，期望 type=%d data=%q", gotKind, gotBody, err, kind, body)
 		}
 	}

@@ -74,6 +74,22 @@ func openPersistenceDB(ctx context.Context, dsn string) (*sql.DB, error) {
 			return nil, fmt.Errorf("初始化弹幕表失败: %w", err)
 		}
 	}
+	// CREATE TABLE IF NOT EXISTS 不升级已有表。旧弹幕保留 NULL 作者，不猜测身份。
+	var hasAuthor int
+	if err := db.QueryRowContext(setupCtx, `SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = DATABASE() AND table_name = 'danmaku_history' AND column_name = 'user_id'`).Scan(&hasAuthor); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("检查历史表作者字段失败: %w", err)
+	}
+	if hasAuthor == 0 {
+		_, err := db.ExecContext(setupCtx, "ALTER TABLE danmaku_history ADD COLUMN user_id VARBINARY(128) NULL")
+		var duplicate *mysql.MySQLError
+		// 多个消费者同时启动时，另一个进程可能已添加字段。
+		if err != nil && !(errors.As(err, &duplicate) && duplicate.Number == 1060) {
+			db.Close()
+			return nil, fmt.Errorf("升级历史表作者字段失败: %w", err)
+		}
+	}
 	return db, nil
 }
 

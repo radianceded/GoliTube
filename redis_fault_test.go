@@ -108,10 +108,11 @@ func TestRedisRestartRecovery(t *testing.T) {
 	}
 	start()
 	first, second := startTestInstance(t, addr), startTestInstance(t, addr)
+	headers := testSessionHeader(t, addr)
 	roomID := fmt.Sprintf("restart-%d", time.Now().UnixNano())
 	dial := func(instance string) *websocket.Conn {
 		t.Helper()
-		conn, _, err := websocket.DefaultDialer.Dial("ws://"+instance+"/ws?room="+roomID, nil)
+		conn, _, err := websocket.DefaultDialer.Dial("ws://"+instance+"/ws?room="+roomID, headers)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -156,14 +157,12 @@ func TestRedisRestartRecovery(t *testing.T) {
 	if err := a.SetReadDeadline(time.Now().Add(6 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = a.ReadMessage()
-	if err == nil {
-		t.Fatal("Redis 停服后意外收到本地广播")
+	_, body, err := a.ReadMessage()
+	var failure ProtocolError
+	if err != nil || json.Unmarshal(body, &failure) != nil || failure.Code != "auth_unavailable" {
+		t.Fatal("Redis 停服应拒绝发送并返回账号服务不可用")
 	}
-	if timeout, ok := err.(interface{ Timeout() bool }); ok && timeout.Timeout() {
-		t.Fatal("发送连接未主动关闭，只等到了客户端读超时")
-	}
-	t.Log("停服阶段：发布失败后发送连接关闭")
+	t.Log("停服阶段：会话检查失败，拒绝发送，不进入发布链路")
 
 	start()
 	// 等待两个仍在运行的 Go 实例重新订阅，而不是固定睡眠。
@@ -180,12 +179,25 @@ func TestRedisRestartRecovery(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	// 专用 Redis 不保存会话；重启后模拟重新登录并建立携带新 Cookie 的连接。
+	headers = testSessionHeader(t, addr)
+	a.Close()
 	a = dial(first)
 	send(a, "after-recovery")
 	receive(a, "after-recovery")
 	receive(b, "after-recovery")
+	send(b, "old-session")
+	if err := b.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	_, body, err = b.ReadMessage()
+	if err != nil || json.Unmarshal(body, &failure) != nil || failure.Code != "unauthenticated" {
+		t.Fatal("Redis 重启后不应继续信任已丢失的会话")
+	}
+	b.Close()
+	b = dial(second)
 	send(b, "reverse-after-recovery")
 	receive(a, "reverse-after-recovery")
 	receive(b, "reverse-after-recovery")
-	t.Log("恢复阶段：Go 进程未重启，A 重连、B 保持原连接，双向广播恢复；未收到故障期间消息")
+	t.Log("恢复阶段：Go 进程未重启，订阅恢复；旧连接仍可接收，发送须重新登录并重连；未补发故障期间消息")
 }
