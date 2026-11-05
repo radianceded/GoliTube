@@ -147,9 +147,10 @@ func TestMySQLRestartRecovery(t *testing.T) {
 		}
 	}()
 	first, second := startTestInstance(t, redisAddr, brokers), startTestInstance(t, redisAddr, brokers)
+	headers := testSessionHeader(t, redisAddr)
 	dial := func(addr string) *websocket.Conn {
 		t.Helper()
-		conn, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws?room="+room, nil)
+		conn, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws?room="+room, headers)
 		if err != nil {
 			t.Fatal(err)
 		}

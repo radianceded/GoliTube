@@ -394,7 +394,7 @@ func TestHeartbeat(t *testing.T) {
 }
 
 func TestPublishFailureClosesConnection(t *testing.T) {
-	server := httptest.NewServer(handleWebSocket(func(context.Context, RoomEvent) error {
+	server := httptest.NewServer(handleProtocolWebSocket(func(context.Context, RoomEvent) error {
 		return errors.New("模拟发布失败")
 	}))
 	defer server.Close()

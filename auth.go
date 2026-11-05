@@ -267,7 +267,7 @@ func (a *authHandler) currentUser(ctx context.Context, r *http.Request) (User, e
 		return User{}, err
 	}
 	var user User
-	if err := json.Unmarshal(data, &user); err != nil || user.ID == "" || !usernamePattern.MatchString(user.Username) {
+	if err := json.Unmarshal(data, &user); err != nil || user.ID == "" || len(user.ID) > 128 || !utf8.ValidString(user.ID) || !usernamePattern.MatchString(user.Username) {
 		return User{}, errors.New("会话记录无效")
 	}
 	return user, nil

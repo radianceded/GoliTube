@@ -12,7 +12,7 @@
 
 启动前准备 Redis（默认 `127.0.0.1:6379`），运行 `go run . -addr localhost:8081 -redis-addr 127.0.0.1:6379`。服务先验证 Redis 连接并确认订阅 `golitube:danmaku`，失败则退出。客户端消息编码为带房间 ID 的事件后发布到 Redis，所有订阅实例收到后仅向本机对应房间广播；发送实例也通过订阅接收自己的事件，不另行直接广播。
 
-第二个终端运行 `go run . -addr localhost:8082 -redis-addr 127.0.0.1:6379`，两个客户端分别连接 8081 和 8082 的同名房间，即可验证跨实例收发。当前所有实例订阅同一公共频道，尚未按房间分片。Redis Pub/Sub 不保存离线消息，发布成功不等于客户端收到；发布出错或超过 3 秒期限时关闭发送连接，不回退为仅本地广播。已验证单次 Redis 正常停服后重启时，Go 实例不重启即可恢复订阅；发送失败的客户端需要重新连接，未发送的客户端可保持原连接继续收发。不提供去重或端到端送达确认，故障期间消息不会补发。实验范围和结果见 [Redis 停服恢复实验](docs/redis-restart-experiment.md)。
+第二个终端运行 `go run . -addr localhost:8082 -redis-addr 127.0.0.1:6379`，两个客户端分别连接 8081 和 8082 的同名房间，即可验证跨实例接收；发送须先登录并携带会话 Cookie。当前所有实例订阅同一公共频道，尚未按房间分片。Redis Pub/Sub 不保存离线消息，发布成功不等于客户端收到。会话查询失败时返回私有 `auth_unavailable` 并保留接收连接；若已通过鉴权而后发布出错，则关闭发送连接，不回退为仅本地广播。Redis 重启后实例可恢复订阅，若会话丢失则需重新登录并重连后才能发送；旧连接可继续接收公开消息。不提供去重或端到端送达确认，故障期间消息不会补发。实验范围和结果见 [Redis 停服恢复实验](docs/redis-restart-experiment.md)。
 
 Windows 使用 WSL Ubuntu 中的 Redis 时，开发期间保持一个 `wsl -d Ubuntu` 终端打开，并在其中用 `redis-cli ping` 确认返回 `PONG`。本机验证发现，没有持续会话时 WSL 可能停止，Windows 侧的 Redis 端口随之不可用。
 
@@ -24,9 +24,9 @@ Windows 使用 WSL Ubuntu 中的 Redis 时，开发期间保持一个 `wsl -d Ub
 {"content":"你好","position_ms":12500,"color":"#ffffff"}
 ```
 
-服务端校验内容、播放时间与颜色，生成消息 ID 和接收时间，同一份结构化事件用于广播和保存。非法输入只向发送者回复错误，不进入发布链路。字段、错误格式与兼容范围见 [弹幕协议 v1](docs/danmaku-protocol.md)。视频实体和弹幕发送鉴权尚未实现。
+服务端校验内容、播放时间与颜色，从 Redis 登录会话确定作者 `user_id`，生成消息 ID 和接收时间，同一份结构化事件用于广播和保存。非法输入只向发送者回复错误，不进入发布链路。字段、错误格式与兼容范围见 [弹幕协议 v1](docs/danmaku-protocol.md)。视频实体尚未实现。
 
-已增加注册、登录、当前身份查询和退出接口，使用 bcrypt 密码哈希及 Redis/Cookie 会话，见 [账号流程](docs/accounts.md)。当前 `/ws` 仍可匿名发送，登录会话尚未接入弹幕链路。
+已增加注册、登录、当前身份查询和退出接口，使用 bcrypt 密码哈希及 Redis/Cookie 会话，见 [账号流程](docs/accounts.md)。`/ws` 允许游客接收，发送前逐条检查会话；退出、过期或令牌轮换后旧连接下次发送被拒绝，重新登录后须重建连接。历史查询仍公开。升级前停止旧消费者，执行 `go run . -mode migrate-history` 为历史表补充可空作者字段，旧记录不补造身份。
 
 历史弹幕接口：`GET /danmaku/history?room=1001&start_ms=0&end_ms=60000`，支持按播放时间分段和游标分页。server 与 persist 需配置相同的 `GOLITUBE_MYSQL_DSN`；首次升级执行 `go run . -mode migrate-history` 初始化并回填旧的正式 JSON 弹幕。参数、启动和手操步骤见 [历史弹幕查询](docs/history-query.md)。
 

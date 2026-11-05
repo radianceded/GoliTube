@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -41,6 +42,7 @@ func TestAuthIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	namespace := "golitube:test-auth:" + rand.Text()
+	room := "auth-room-" + rand.Text()
 	username := strings.ToLower("u_" + rand.Text())
 	password := "test-password-123"
 	defer func() {
@@ -48,6 +50,11 @@ func TestAuthIntegration(t *testing.T) {
 		defer stop()
 		if _, err := db.ExecContext(cleanupCtx, "DELETE FROM users WHERE username = ?", username); err != nil {
 			t.Error(err)
+		}
+		for _, table := range []string{"danmaku_history", "danmaku"} {
+			if _, err := db.ExecContext(cleanupCtx, "DELETE FROM "+table+" WHERE room_id = ?", room); err != nil {
+				t.Error(err)
+			}
 		}
 		iterator := rdb.Scan(cleanupCtx, 0, namespace+":*", 100).Iterator()
 		for iterator.Next(cleanupCtx) {
@@ -60,7 +67,14 @@ func TestAuthIntegration(t *testing.T) {
 		}
 	}()
 	a := &authHandler{db: db, rdb: rdb, namespace: namespace}
-	first, second := httptest.NewServer(a), httptest.NewServer(&authHandler{db: db, rdb: rdb, namespace: namespace})
+	accepted := make(chan RoomEvent, 4)
+	mux := http.NewServeMux()
+	mux.Handle("/auth/", a)
+	mux.HandleFunc("/ws", handleWebSocket(func(ctx context.Context, event RoomEvent) error {
+		accepted <- event
+		return localPublish(ctx, event)
+	}, a))
+	first, second := httptest.NewServer(mux), httptest.NewServer(&authHandler{db: db, rdb: rdb, namespace: namespace})
 	defer first.Close()
 	defer second.Close()
 	jar, _ := cookiejar.New(nil)
@@ -124,6 +138,64 @@ func TestAuthIntegration(t *testing.T) {
 		t.Fatal("missing protected session cookie")
 	}
 	old := *cookies[0]
+	defer waitForRoomCount(t, room, 0)
+	dial := func(cookie *http.Cookie) *websocket.Conn {
+		t.Helper()
+		headers := http.Header{}
+		if cookie != nil {
+			headers.Set("Cookie", cookie.Name+"="+cookie.Value)
+		}
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(first.URL, "http")+"/ws?room="+room, headers)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return conn
+	}
+	read := func(conn *websocket.Conn) []byte {
+		t.Helper()
+		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, body, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	sendError := func(conn *websocket.Conn, payload []byte, code string) {
+		t.Helper()
+		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			t.Fatal(err)
+		}
+		var failure ProtocolError
+		if err := json.Unmarshal(read(conn), &failure); err != nil || failure.Code != code || len(accepted) != 0 {
+			t.Fatalf("rejected send: %+v err=%v", failure, err)
+		}
+	}
+	guest, sender := dial(nil), dial(&old)
+	defer guest.Close()
+	defer sender.Close()
+	waitForRoomCount(t, room, 2)
+	sendError(guest, testDanmakuPayload(t, "anonymous"), "unauthenticated")
+	sendError(sender, []byte(`{"content":"spoof","position_ms":0,"user_id":"another-user"}`), "invalid_danmaku")
+	if err := sender.WriteMessage(websocket.TextMessage, testDanmakuPayload(t, "实名弹幕")); err != nil {
+		t.Fatal(err)
+	}
+	broadcastBody := read(sender)
+	if !bytes.Equal(read(guest), broadcastBody) {
+		t.Fatal("anonymous receiver missed broadcast, or private error leaked")
+	}
+	event := <-accepted
+	var danmaku Danmaku
+	if json.Unmarshal(broadcastBody, &danmaku) != nil || danmaku.UserID != registered.User.ID || !bytes.Equal(broadcastBody, event.Data) {
+		t.Fatal("session identity was not used consistently")
+	}
+	// 此测试显式调用保存函数验证真实 MySQL 投影；Kafka 链路由独立测试覆盖。
+	if err := saveRoomEvent(ctx, db, event); err != nil {
+		t.Fatal(err)
+	}
+	page, err := queryHistory(ctx, db, HistoryQuery{RoomID: room, StartMS: 0, EndMS: 60000, Limit: 200})
+	if err != nil || len(page.Items) != 1 || page.Items[0] != danmaku {
+		t.Fatalf("history identity differs: %+v err=%v", page, err)
+	}
 	if ttl, err := rdb.TTL(ctx, a.sessionKey(old.Value)).Result(); err != nil || ttl < 23*time.Hour || ttl > sessionTTL {
 		t.Fatal("incorrect session TTL")
 	}
@@ -152,12 +224,18 @@ func TestAuthIntegration(t *testing.T) {
 		}
 	}
 	replay(&old, 401)
+	sendError(sender, testDanmakuPayload(t, "rotated session"), "unauthenticated")
 	current := *cookies[0]
+	loggedOut := dial(&current)
+	defer loggedOut.Close()
 	request(client, "POST", second.URL+"/auth/logout", nil, 204)
 	request(client, "GET", first.URL+"/auth/me", nil, 401)
 	replay(&current, 401)
+	sendError(loggedOut, testDanmakuPayload(t, "logged out"), "unauthenticated")
 	request(client, "POST", first.URL+"/auth/logout", nil, 204)
 	_, cookies = request(client, "POST", first.URL+"/auth/login", credentials, 200)
+	expired := dial(cookies[0])
+	defer expired.Close()
 	if err := rdb.PExpire(ctx, a.sessionKey(cookies[0].Value), time.Millisecond).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +248,7 @@ func TestAuthIntegration(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	request(client, "GET", second.URL+"/auth/me", nil, 401)
+	sendError(expired, testDanmakuPayload(t, "expired"), "unauthenticated")
 	secure := httptest.NewTLSServer(&authHandler{db: db, rdb: rdb, namespace: namespace, secureCookie: true})
 	defer secure.Close()
 	_, cookies = request(secure.Client(), "POST", secure.URL+"/auth/login", credentials, 200)
@@ -181,5 +260,5 @@ func TestAuthIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request(client, "POST", first.URL+"/auth/login", credentials, 429)
-	t.Log("真实 MySQL/Redis：注册、重复用户名、密码哈希、登录、两个 HTTP 服务共享会话、令牌轮换、退出重放、过期、Secure Cookie 和限流通过")
+	t.Log("真实 MySQL/Redis：注册登录、共享会话、游客接收、发送鉴权、防伪造、作者入库与历史一致、旧连接轮换/退出/过期失效、Secure Cookie 和限流通过")
 }
