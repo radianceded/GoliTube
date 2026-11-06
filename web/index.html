@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>GoliTube · 弹幕房间</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到房间内容</a>
+  <header class="topbar">
+    <div class="brand-group">
+      <button class="icon-button" id="menu-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="navigation">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+      <a href="/" class="brand" aria-label="GoliTube 首页"><span class="brand-mark" aria-hidden="true"></span><strong>GoliTube</strong><sup>弹幕</sup></a>
+    </div>
+    <form id="room-form" class="room-search">
+      <label class="visually-hidden" for="room-input">房间号</label>
+      <input id="room-input" name="room" placeholder="输入房间号" value="1001" maxlength="128" required autocomplete="off">
+      <button type="submit" aria-label="进入房间" title="进入房间"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button>
+    </form>
+    <div class="account-actions">
+      <span id="account-label" class="account-label">确认登录状态中</span>
+      <button id="account-open" class="sign-in" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/></svg>登录</button>
+      <button id="logout" class="text-button" hidden>退出</button>
+    </div>
+  </header>
+
+  <nav id="navigation" class="navigation" aria-label="页面导航" hidden>
+    <a href="#main">当前房间</a><a href="#history-section">历史弹幕</a><button id="nav-account">账号管理</button>
+  </nav>
+  <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
+
+  <main id="main" class="workspace">
+    <section class="room-column" aria-label="弹幕舞台与发送">
+      <div id="stage" class="stage">
+        <div class="stage-top"><span class="stage-brand">GoliTube</span><span id="stage-room">房间 1001</span></div>
+        <div id="stage-empty" class="stage-empty">
+          <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M12 15h40v29H30L18 53v-9h-6z"/><path d="M22 26h20M22 34h13"/></svg>
+          <h1>让交流，出现在同一屏。</h1>
+          <p id="stage-hint">输入房间号，和朋友一起收发弹幕</p>
+          <button id="stage-join" class="light-button">进入房间</button>
+        </div>
+        <div id="danmaku-layer" class="danmaku-layer" aria-hidden="true"></div>
+        <div class="stage-bottom"><span>实时弹幕舞台</span><label><input id="show-danmaku" type="checkbox" checked>显示弹幕</label></div>
+      </div>
+
+      <div class="room-heading">
+        <div><h2 id="room-title">房间 1001</h2><p>同一房间，每个人都能收到你的声音。</p></div>
+        <div class="connection-actions"><span id="connection-status" class="status" data-state="idle">未连接</span><button id="leave-room" class="text-button" disabled>离开</button></div>
+      </div>
+
+      <form id="send-form" class="composer">
+        <div class="composer-heading"><span id="composer-avatar" class="avatar" aria-hidden="true">G</span><strong>发送一条弹幕</strong><span id="content-count">0 / 255</span></div>
+        <label class="visually-hidden" for="content">弹幕内容</label>
+        <textarea id="content" rows="2" placeholder="登录后，把想说的话写在这里" required disabled></textarea>
+        <div class="composer-options">
+          <label>播放位置 <span class="input-with-unit"><input id="position" type="number" min="0" step="0.001" value="0" required aria-label="播放位置（秒）"><span>秒</span></span></label>
+          <label class="color-label">颜色 <input id="color" type="color" value="#ffffff" aria-label="弹幕颜色"></label>
+          <button id="send" class="primary-button" type="submit" disabled>登录后发送</button>
+        </div>
+        <p id="send-status" class="hint" role="status">游客也可以进入房间接收弹幕。</p>
+      </form>
+
+      <section id="history-section" class="history-section" aria-labelledby="history-heading">
+        <div class="section-heading"><div><h2 id="history-heading">历史弹幕</h2><p id="history-room">房间 1001 · 已保存的消息</p></div><span class="subtle-tag">按播放位置查看</span></div>
+        <form id="history-form" class="history-filters">
+          <label>开始（秒）<input id="history-start" type="number" min="0" step="0.001" value="0" required></label>
+          <label>结束（秒）<input id="history-end" type="number" min="0.001" step="0.001" value="60" required></label>
+          <label>每页条数<select id="history-limit"><option value="20">20</option><option value="50">50</option><option value="200">200</option></select></label>
+          <button id="history-search" class="secondary-button" type="submit">查询历史</button>
+        </form>
+        <p id="history-status" class="hint" role="status">选择最长 60 秒的时间段。刚发送的弹幕可能稍后才出现在历史中。</p>
+        <ol id="history-list" class="history-list" aria-label="历史弹幕列表"></ol>
+        <button id="history-more" class="secondary-button more-button" hidden>加载更多</button>
+      </section>
+    </section>
+
+    <aside class="chat-panel" aria-labelledby="chat-heading">
+      <div class="chat-heading"><h2 id="chat-heading">实时聊天</h2><span id="live-count">0 条</span></div>
+      <p class="chat-subtitle">弹幕将同步出现在舞台上</p>
+      <div id="chat-scroll" class="chat-scroll">
+        <div id="chat-empty" class="chat-empty"><span class="empty-bubble" aria-hidden="true">···</span><strong>这里等着第一条弹幕</strong><p>进入房间后，新消息会实时出现。</p></div>
+        <ol id="live-list" class="live-list" aria-label="实时弹幕列表" aria-live="polite" aria-relevant="additions"></ol>
+      </div>
+      <div class="chat-footer"><span class="status-dot" aria-hidden="true"></span><span id="chat-footer-text">连接房间后开始接收</span></div>
+    </aside>
+  </main>
+
+  <footer class="page-footer"><strong>GoliTube</strong><span>每一条弹幕，都有回响。</span></footer>
+
+  <dialog id="account-dialog" aria-labelledby="account-heading">
+    <button id="account-close" class="icon-button dialog-close" aria-label="关闭账号窗口">×</button>
+    <span class="brand-mark" aria-hidden="true"></span>
+    <h2 id="account-heading">登录 GoliTube</h2>
+    <p class="dialog-description">登录后，加入房间并发送你的第一条弹幕。</p>
+    <form id="account-form">
+      <fieldset id="account-fields">
+        <div class="account-tabs" aria-label="账号操作"><button id="login-mode" type="button" aria-pressed="true">登录</button><button id="register-mode" type="button" aria-pressed="false">注册</button></div>
+        <label>用户名<input id="username" name="username" autocomplete="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_]{3,32}" title="3～32 位英文字母、数字或下划线" required></label>
+        <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+        <p class="hint" id="password-hint">至少 8 个字符，最多 72 个 UTF-8 字节。</p>
+        <button class="primary-button" type="submit" id="account-submit">登录</button>
+      </fieldset>
+      <p id="account-status" class="form-status" role="status"></p>
+    </form>
+  </dialog>
+</body>
+</html>
