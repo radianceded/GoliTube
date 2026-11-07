@@ -346,9 +346,6 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 	}()
 	log.Println("Redis 频道订阅成功:", danmakuChannel)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", serveWebClient)
-	mux.HandleFunc("/health", health)
 	publish := func(ctx context.Context, event RoomEvent) error {
 		return publishRoomEvent(ctx, rdb, event)
 	}
@@ -366,11 +363,9 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 		appDB = db
 		history = func(ctx context.Context, q HistoryQuery) (HistoryPage, error) { return queryHistory(ctx, db, q) }
 	}
-	mux.HandleFunc("/danmaku/history", handleHistory(history))
 	auth := &authHandler{db: appDB, rdb: rdb, namespace: "golitube", secureCookie: os.Getenv("GOLITUBE_COOKIE_SECURE") == "1"}
-	mux.Handle("/auth/", auth)
-	mux.HandleFunc("/ws", handleWebSocket(publish, auth))
+	router := newRouter(auth, history, publish)
 	log.Printf("准备监听 http://%s", addr)
 
-	return http.ListenAndServe(addr, mux)
+	return http.ListenAndServe(addr, router)
 }

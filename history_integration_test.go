@@ -102,7 +102,7 @@ func TestHistoryIntegration(t *testing.T) {
 	if err := saveRoomEvent(ctx, db, conflict); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(handleHistory(func(ctx context.Context, q HistoryQuery) (HistoryPage, error) { return queryHistory(ctx, db, q) }))
+	server := httptest.NewServer(newRouter(&authHandler{}, func(ctx context.Context, q HistoryQuery) (HistoryPage, error) { return queryHistory(ctx, db, q) }, localPublish))
 	defer server.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
 	get := func(start, end int64, limit int, cursor string) HistoryPage {

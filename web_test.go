@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -9,9 +8,7 @@ import (
 )
 
 func TestWebClientRoutes(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", serveWebClient)
-	mux.HandleFunc("/health", health)
+	router := newRouter(&authHandler{}, nil, localPublish)
 	for _, test := range []struct {
 		method, path, contentType, body string
 		status                          int
@@ -29,7 +26,7 @@ func TestWebClientRoutes(t *testing.T) {
 		t.Run(test.method+test.path, func(t *testing.T) {
 			r := httptest.NewRequest(test.method, test.path, nil)
 			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, r)
+			router.ServeHTTP(w, r)
 			if w.Code != test.status || !strings.HasPrefix(w.Header().Get("Content-Type"), test.contentType) ||
 				!strings.Contains(w.Body.String(), test.body) || !utf8.Valid(w.Body.Bytes()) {
 				t.Fatalf("status=%d content-type=%q", w.Code, w.Header().Get("Content-Type"))

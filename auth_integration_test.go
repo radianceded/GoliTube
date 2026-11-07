@@ -68,13 +68,12 @@ func TestAuthIntegration(t *testing.T) {
 	}()
 	a := &authHandler{db: db, rdb: rdb, namespace: namespace}
 	accepted := make(chan RoomEvent, 4)
-	mux := http.NewServeMux()
-	mux.Handle("/auth/", a)
-	mux.HandleFunc("/ws", handleWebSocket(func(ctx context.Context, event RoomEvent) error {
+	router := newRouter(a, nil, func(ctx context.Context, event RoomEvent) error {
 		accepted <- event
 		return localPublish(ctx, event)
-	}, a))
-	first, second := httptest.NewServer(mux), httptest.NewServer(&authHandler{db: db, rdb: rdb, namespace: namespace})
+	})
+	first := httptest.NewServer(router)
+	second := httptest.NewServer(newRouter(&authHandler{db: db, rdb: rdb, namespace: namespace}, nil, localPublish))
 	defer first.Close()
 	defer second.Close()
 	jar, _ := cookiejar.New(nil)
