@@ -65,3 +65,10 @@ jobs:
           options=(-i ~/.ssh/golitube -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
           ssh "${options[@]}" "golitube-deploy@$DEPLOY_HOST" "upload $GITHUB_SHA" < build/golitube
           ssh "${options[@]}" "golitube-deploy@$DEPLOY_HOST" "deploy $GITHUB_SHA"
+      - name: Verify public HTTPS endpoint
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.GOLITUBE_PUBLIC_URL != ''
+        env:
+          PUBLIC_URL: ${{ vars.GOLITUBE_PUBLIC_URL }}
+        run: |
+          result=$(curl --fail --silent --show-error --retry 3 --retry-delay 3 --max-time 20 "$PUBLIC_URL/health")
+          test "$result" = ccb

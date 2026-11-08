@@ -65,6 +65,8 @@ ssh-keygen -F "$HOST" | sed '/^#/d' | gh secret set GOLITUBE_SSH_HOST_KEY
 
 基础设施配置变更由管理员审核后重新运行安装脚本，发布密钥的权限范围覆盖程序上传及发布。部署期间先完整写入临时程序，再原子重命名到最终文件，复制中断后可重试。
 
+域名 HTTPS 启用后，设置仓库 Actions Variable `GOLITUBE_PUBLIC_URL`，例如 `https://your-domain.cn`。部署后 runner 会再次检查公网 `/health` 的证书与响应，失败时 workflow 标记失败，便于发现云防火墙或公网入口问题。
+
 ## 发布与回滚
 
 发布先暂停旧 persist，原子切换 current，执行已有 `migrate-history` 初始化及回填，再重启 server 与 persist。初始化或检查失败时恢复上一个程序版本。检查覆盖 `/health`、一次直接查库的历史请求、Redis 在线统计和 persist 进程状态。
