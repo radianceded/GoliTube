@@ -15,7 +15,8 @@ mkdir -p "$release"
 if [[ -f $release/golitube ]]; then
     cmp "$upload" "$release/golitube" # 同一版本的程序不可被不同内容覆盖。
 else
-    install -o root -g root -m 755 "$upload" "$release/golitube"
+    install -o root -g root -m 755 "$upload" "$release/.golitube-next"
+    mv -f "$release/.golitube-next" "$release/golitube"
 fi
 
 rollback() {

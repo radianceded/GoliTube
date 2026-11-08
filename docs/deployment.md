@@ -9,7 +9,7 @@
 - MySQL 和 Kafka 使用 Docker 命名卷，端口绑定 `127.0.0.1`。Redis 也只监听本机，使用 AOF、每秒 fsync 和 `noeviction`，内存上限 256 MB。
 - 安装脚本设置 `GOLITUBE_TRUST_LOOPBACK_PROXY=1`。账号限流只在直连来源为回环地址时接受 Nginx 覆盖写入的 `X-Real-IP`，Go 监听地址保持 `127.0.0.1:8081`。直接来自外部的转发头不会被信任。
 - Redis 达到内存上限时可能拒绝新增写入，应用会返回不可用。AOF 每秒同步仍存在故障时丢失最近写入的窗口，备份与恢复演练需要另行安排。[Redis 持久化说明](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/)
-- Kafka 每分区日志保留上限设为 256 MiB，时间上限 7 天。消费者长时间落后可能超过保留窗口。当前单节点配置用于演示，容量未压测。
+- Kafka 每分区日志保留目标设为 256 MiB，时间上限 7 天。清理按日志段进行，实际磁盘占用可能超过该目标。消费者长时间落后可能超过保留窗口。当前单节点配置用于演示，容量未压测。
 
 ## 首次安装
 
@@ -62,6 +62,8 @@ ssh-keygen -F "$HOST" | sed '/^#/d' | gh secret set GOLITUBE_SSH_HOST_KEY
 `.github/workflows/deploy.yml` 在 PR 中运行真实 Redis、MySQL、Kafka 集成测试、竞态检测、vet、脚本语法检查和 Linux 编译。main 收到 push 或手动触发时，测试通过后通过 SSH 上传可执行文件，再发布同一提交号。Secrets 只在 main 的部署步骤使用，SSH 启用严格主机指纹校验。
 
 本地 `git commit` 后推送分支并合并 PR，才会触发 main 的自动部署。首次加入 workflow 也需要合并到 main 后启用。应用程序与内嵌前端一起编译。Actions 构建与部署由并发组串行管理，服务器再通过文件锁避免发布交错。
+
+基础设施配置变更由管理员审核后重新运行安装脚本，发布密钥的权限范围覆盖程序上传及发布。部署期间先完整写入临时程序，再原子重命名到最终文件，复制中断后可重试。
 
 ## 发布与回滚
 
