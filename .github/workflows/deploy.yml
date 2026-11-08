@@ -62,6 +62,6 @@ jobs:
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/golitube
           printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
           trap 'rm -f ~/.ssh/golitube' EXIT
-          options=(-i ~/.ssh/golitube -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15)
+          options=(-i ~/.ssh/golitube -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
           ssh "${options[@]}" "golitube-deploy@$DEPLOY_HOST" "upload $GITHUB_SHA" < build/golitube
           ssh "${options[@]}" "golitube-deploy@$DEPLOY_HOST" "deploy $GITHUB_SHA"
