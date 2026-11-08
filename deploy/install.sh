@@ -51,7 +51,9 @@ systemctl enable --now docker redis-server nginx
 systemctl restart redis-server
 docker compose --env-file /etc/golitube/dependencies.env -f /opt/golitube/deploy/compose.yaml up -d --wait kafka mysql
 docker compose --env-file /etc/golitube/dependencies.env -f /opt/golitube/deploy/compose.yaml run --rm kafka-init
-install -m 644 "$source_dir/deploy/nginx.conf" /etc/nginx/sites-available/golitube
+if [[ ! -f /etc/nginx/sites-available/golitube ]]; then
+    install -m 644 "$source_dir/deploy/nginx.conf" /etc/nginx/sites-available/golitube
+fi
 ln -sfn /etc/nginx/sites-available/golitube /etc/nginx/sites-enabled/golitube
 if [[ -L /etc/nginx/sites-enabled/default ]]; then
     unlink /etc/nginx/sites-enabled/default

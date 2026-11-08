@@ -86,7 +86,7 @@ ssh -i ~/.ssh/golitube-deploy golitube-deploy@"$HOST" "deploy $SHA"
 systemctl status golitube-server golitube-persist
 sudo journalctl -u golitube-server -u golitube-persist -n 100 --no-pager
 sudo readlink -f /opt/golitube/current
-curl -f http://127.0.0.1/health
+curl -f http://127.0.0.1:8081/health
 sudo docker compose --env-file /etc/golitube/dependencies.env -f /opt/golitube/deploy/compose.yaml ps
 ```
 
@@ -94,4 +94,17 @@ sudo docker compose --env-file /etc/golitube/dependencies.env -f /opt/golitube/d
 
 初始 Nginx 配置提供 80 端口的 HTTP 验收入口。云防火墙需要允许该端口。SSH 及数据库端口的访问策略应按运维需要配置，数据库与消息队列当前仅绑定本机。
 
-域名和 HTTPS 配置完成后，将 `/etc/golitube/app.env` 中 `GOLITUBE_COOKIE_SECURE` 改为 `1` 并重启 server。HTTPS 反向代理需要继续保留 Host 与 WebSocket Upgrade 请求头。当前初始配置下浏览器到服务器的 HTTP 流量为明文，正式账号使用应在 HTTPS 配置完成后进行。
+域名解析与备案确认完成后，可上传新版 deploy 目录，在服务器执行以下命令。云防火墙需要允许 80 和 443 端口。
+
+```bash
+sudo bash /home/ubuntu/golitube-src/deploy/enable-https.sh your-domain.cn
+```
+
+脚本通过 Let's Encrypt 为根域名与 www 签发证书，配置 HTTP 跳转 HTTPS、WebSocket 代理、证书续期定时器和续期后重载 Nginx，同时将 `GOLITUBE_COOKIE_SECURE` 改为 `1` 并重启 server。首次签发采用无通知邮箱的 ACME 账户，后续可由管理员补充账户通知邮箱。重新运行安装脚本保留已有 TLS 站点配置。
+
+HTTPS 配置前，初始 HTTP 入口的浏览器流量为明文，正式账号使用应在 HTTPS 配置完成后进行。续期可通过以下命令演练。
+
+```bash
+sudo certbot renew --dry-run
+systemctl status certbot.timer
+```
