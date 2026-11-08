@@ -17,6 +17,7 @@
 | 异步持久化 | Kafka 接收事件，独立消费者写入 MySQL，事务提交成功后提交消费位点 |
 | 历史查询 | 按房间及播放位置范围查询，联合索引、游标分页、旧归档回填、常用窗口 Redis 缓存 |
 | 在线统计 | 跨实例汇总在线连接数、实例租约过期回收、网页定时刷新 |
+| 房间点赞 | 每个登录用户每房间一赞、取消点赞、幂等更新、跨实例共享总数与个人状态 |
 
 ## 技术栈
 
@@ -53,7 +54,7 @@ docker compose run --rm kafka-init
 
 | 服务 | 本机地址 | 用途 |
 | --- | --- | --- |
-| Redis | `127.0.0.1:6379` | 登录会话、账号限流、实时广播、历史缓存与在线统计 |
+| Redis | `127.0.0.1:6379` | 登录会话、账号限流、实时广播、历史缓存、在线统计与房间点赞 |
 | Kafka | `127.0.0.1:19092` | 弹幕持久化事件 |
 | MySQL | `127.0.0.1:13306` | 用户、弹幕归档与历史查询 |
 
@@ -98,6 +99,7 @@ go run . -mode persist -kafka-brokers 127.0.0.1:19092
 4. 打开另一个窗口，进入同一房间，检查弹幕同步。使用不同房间号可验证隔离。
 5. 在历史区选择最长 60 秒的播放区间，查询已保存的弹幕并加载下一页。异步保存存在延迟，可以稍后重新查询。
 6. 点击退出，页面会重建游客连接，继续接收房间弹幕。
+7. 登录并进入房间后，点击房间标题旁的点赞按钮，再次点击取消。刷新页面后重新进入房间，可以看到个人点赞状态。游客可查看总数，各实例的页面约每 3 秒同步一次。
 
 实时区显示最近 200 条消息，历史区最多显示 1,000 条。网络中断后自动退避重连并保留草稿。重连后可手动重试发送，或通过历史查询补看已保存的消息。
 
@@ -128,7 +130,7 @@ flowchart TD
     Persist -->|事务提交成功后提交位点| Kafka
     Persist -->|事务提交后切换历史缓存版本| Redis
     API <-->|用户与历史记录| DB
-    API <-->|会话、限流、历史缓存与在线统计| Redis
+    API <-->|会话、限流、历史缓存、在线统计与点赞| Redis
     Instances -->|每 3 秒上报本机连接数| Redis
 ```
 
@@ -143,6 +145,14 @@ HTTP 入口由 `router.go` 中的 Gin Engine 统一注册，账号接口使用 `
 - Redis 缓存读写各使用最多 150 毫秒的预算，缓存异常时回源 MySQL，数据库查询失败不会缓存为空结果。冷缓存的并发请求仍可能同时回源，当前未合并这些请求，也未进行容量压测。
 - 每个 server 使用随机实例身份，每 3 秒快照本机房间连接数，释放房间锁后上报 Redis。Hash 保存各实例计数，ZSET 保存 10 秒租约，Lua 使用 Redis 时钟原子更新与汇总。最后一条连接离开后，下次上报移除本实例贡献。
 - `/rooms/online` 返回尚未过期的连接数。实例停止上报后，其贡献在最后一次成功上报的 10 秒租约到期后被排除。辅助键设置 20 秒 TTL。网页约每 3 秒查询一次，显示存在上报和轮询延迟，同一用户打开两个标签页计为两个连接。统计失败显示暂不可用。
+
+### 房间点赞
+
+- `GET /rooms/likes?room=1001` 返回 `{"room_id":"1001","likes":2,"liked":true}`。`likes` 是房间总数，`liked` 是当前会话用户的状态。游客或过期会话查询时 `liked` 为 false，未知房间总数为 0。响应使用 `Cache-Control: no-store`。
+- `PUT /rooms/likes?room=1001` 接受 `{"liked":true}` 点赞、`{"liked":false}` 取消。服务端从 Redis 会话确定用户 ID，拒绝额外字段，写请求校验同源 Origin。游客修改返回 401，Redis 不可用返回 503。
+- 每房间一个 Redis Set 保存用户 ID。Lua 内执行 `SADD` 或 `SREM`，再返回 `SCARD` 和 `SISMEMBER`，让操作与响应状态保持原子性。集合本身就是计数来源，同一用户重复点赞与重复取消均幂等。不同客户端同时提交相反状态时，以 Redis 实际执行顺序为准。
+- 网页提交明确的目标状态，等待成功响应后更新按钮。读取失败显示暂不可用，写入响应丢失时重新查询当前状态。复用在线统计的轮询周期获取各实例共享的最新点赞数，切换房间或重连时丢弃旧请求结果。
+- 点赞关系保存在 Redis，键不设置 TTL。Go 服务重启可继续读取同一 Redis 中的记录。Redis 重启后的恢复程度取决于部署的 RDB/AOF 配置，数据被清空或淘汰后，当前版本无法从 MySQL 重建点赞关系。容量随实际点赞关系增长。
 
 ### 可靠性与连接约定
 
@@ -177,6 +187,8 @@ HTTP 入口由 `router.go` 中的 Gin Engine 统一注册，账号接口使用 `
 | GET / WebSocket Upgrade | `/ws?room=1001` | 加入房间、接收与发送弹幕 |
 | GET | `/danmaku/history?room=1001&start_ms=0&end_ms=60000` | 查询播放区间 `[0, 60000)` 的历史弹幕 |
 | GET | `/rooms/online?room=1001` | 返回 `{"room_id":"1001","online_connections":2}`，未知房间返回 0 |
+| GET | `/rooms/likes?room=1001` | 查询房间点赞总数与当前用户点赞状态 |
+| PUT | `/rooms/likes?room=1001` | 设置 `{"liked":true}` 或 `{"liked":false}`，需要登录 |
 
 客户端通过 WebSocket 文本帧发送业务字段。
 
@@ -224,6 +236,7 @@ $env:GOLITUBE_TEST_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/gol
 $env:GOLITUBE_TEST_REDIS_ADDR = '127.0.0.1:6379'
 go test -race -v -run '^(TestAuthIntegration|TestHistoryIntegration|TestCrossInstanceBroadcast)$' -timeout 60s .
 go test -race -v -run '^(TestHistoryCache.*|TestRoomPresenceAggregation|TestOnlineValidation|TestCrossInstanceOnlineConnections)$' -timeout 60s .
+go test -race -v -run '^TestRoomLikes.*$' -timeout 60s .
 ```
 
 | 已执行的验证 | 覆盖内容 |
@@ -231,11 +244,14 @@ go test -race -v -run '^(TestHistoryCache.*|TestRoomPresenceAggregation|TestOnli
 | 账号与发送鉴权 | 注册登录、游客接收、防伪造作者、退出/过期/轮换后已有连接发送失效 |
 | 跨进程广播 | 两个独立 Go 实例的同房间互通与跨房间隔离 |
 | 历史缓存与在线统计 | 命中、空结果、过期、损坏与 Redis 故障回源；提交后失效、并发旧回填隔离；跨实例连接加入、离开与租约过期 |
+| 房间点赞 | 游客读取、登录校验、请求校验、并发去重、重复点赞与取消幂等、房间隔离、共享 Redis 状态、退出后拒绝修改 |
 | 持久化与历史 | Kafka 到 MySQL 的完整链路、重复消费幂等、作者一致、游标分页与事务回滚 |
 | 故障恢复 | 专用 Redis 重启后的订阅恢复、会话丢失处理，以及专用 MySQL 重启后的消费补存 |
 | 浏览器交互 | 真实双浏览器会话、注册登录、23 条消息分页、服务重启重连、退出后接收、文本渲染及移动端宽度 |
 
 浏览器交互验证于 2026-11-06 使用两个 server 进程、一个 persist 进程及真实 Redis、Kafka、MySQL 完成。历史查询 503 提示另用模拟 HTTP 响应验证。
+
+2026-11-08 补充双实例浏览器验证，覆盖在线租约回收、点赞刷新保留、两账号累加与取消、跨实例总数同步和移动端宽度。点赞 GET/PUT 的 503 提示与恢复使用模拟 HTTP 响应验证。
 
 当前部署与实验使用单节点中间件。吞吐量、最大连接数、P95/P99 和资源消耗属于后续压测记录项。上表中的消息数量与配置参数用于说明测试范围。
 
@@ -255,6 +271,7 @@ persistence.go      Kafka 生产消费、MySQL 事务与表结构初始化
 history.go          历史查询、游标、查询表投影与归档回填
 history_cache.go    常用历史窗口缓存、短 TTL 与版本失效
 presence.go         在线连接快照、Redis 租约与汇总查询
+likes.go            房间点赞、会话鉴权与 Redis 集合原子更新
 schema.sql          用户、弹幕归档及历史查询表
 compose.yaml        Kafka、MySQL 与主题初始化
 docs/               协议、运行说明与故障实验记录
