@@ -361,7 +361,9 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 		}
 		defer db.Close()
 		appDB = db
-		history = func(ctx context.Context, q HistoryQuery) (HistoryPage, error) { return queryHistory(ctx, db, q) }
+		history = cachedHistory(rdb, func(ctx context.Context, q HistoryQuery) (HistoryPage, error) {
+			return queryHistory(ctx, db, q)
+		})
 	}
 	auth := &authHandler{db: appDB, rdb: rdb, namespace: "golitube", secureCookie: os.Getenv("GOLITUBE_COOKIE_SECURE") == "1"}
 	router := newRouter(auth, history, publish)
