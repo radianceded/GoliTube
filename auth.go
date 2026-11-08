@@ -46,10 +46,11 @@ type credentials struct {
 }
 
 type authHandler struct {
-	db           *sql.DB
-	rdb          *redis.Client
-	namespace    string
-	secureCookie bool
+	db                 *sql.DB
+	rdb                *redis.Client
+	namespace          string
+	secureCookie       bool
+	trustLoopbackProxy bool
 }
 
 func authJSON(w http.ResponseWriter, status int, value any) {
@@ -186,10 +187,7 @@ func (a *authHandler) sessionKey(token string) string {
 func (a *authHandler) rateKey(ip string) string { return a.namespace + ":auth-rate:" + digest(ip) }
 
 func (a *authHandler) allowAttempt(w http.ResponseWriter, r *http.Request) bool {
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		ip = r.RemoteAddr
-	}
+	ip := a.clientIP(r)
 	count, err := a.rdb.Eval(r.Context(), `local n=redis.call('INCR',KEYS[1]); if n==1 then redis.call('EXPIRE',KEYS[1],60) end; return n`, []string{a.rateKey(ip)}).Int64()
 	if err != nil {
 		a.unavailable(w, err)
@@ -201,6 +199,19 @@ func (a *authHandler) allowAttempt(w http.ResponseWriter, r *http.Request) bool 
 		return false
 	}
 	return true
+}
+
+func (a *authHandler) clientIP(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
+	}
+	if a.trustLoopbackProxy && net.ParseIP(ip).IsLoopback() {
+		if forwarded := net.ParseIP(r.Header.Get("X-Real-IP")); forwarded != nil {
+			return forwarded.String()
+		}
+	}
+	return ip
 }
 
 func (a *authHandler) register(w http.ResponseWriter, r *http.Request, input credentials) {

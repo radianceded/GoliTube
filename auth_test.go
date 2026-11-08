@@ -59,3 +59,25 @@ func TestAuthMethodsAndOrigin(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthClientIP(t *testing.T) {
+	for _, test := range []struct {
+		trusted                 bool
+		remote, forwarded, want string
+	}{
+		{false, "127.0.0.1:1000", "203.0.113.1", "127.0.0.1"},
+		{true, "127.0.0.1:1000", "203.0.113.1", "203.0.113.1"},
+		{true, "[::1]:1000", "2001:db8::1", "2001:db8::1"},
+		{true, "198.51.100.1:1000", "203.0.113.1", "198.51.100.1"},
+		{true, "127.0.0.1:1000", "203.0.113.1, 198.51.100.1", "127.0.0.1"},
+		{true, "127.0.0.1:1000", "", "127.0.0.1"},
+	} {
+		r := httptest.NewRequest("POST", "/auth/login", nil)
+		r.RemoteAddr = test.remote
+		r.Header.Set("X-Real-IP", test.forwarded)
+		a := &authHandler{trustLoopbackProxy: test.trusted}
+		if got := a.clientIP(r); got != test.want {
+			t.Fatalf("trusted=%t remote=%q forwarded=%q got=%q want=%q", test.trusted, test.remote, test.forwarded, got, test.want)
+		}
+	}
+}

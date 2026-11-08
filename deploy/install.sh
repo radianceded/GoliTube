@@ -32,6 +32,9 @@ application = Path('/etc/golitube/app.env')
 if not application.exists():
     application.write_text('GOLITUBE_MYSQL_DSN=golitube:' + values['MYSQL_PASSWORD'] + '@tcp(127.0.0.1:13306)/golitube\nGOLITUBE_COOKIE_SECURE=0\nGIN_MODE=release\n')
 application.chmod(0o600)
+if 'GOLITUBE_TRUST_LOOPBACK_PROXY=' not in application.read_text():
+    with application.open('a') as output:
+        output.write('GOLITUBE_TRUST_LOOPBACK_PROXY=1\n')
 PY
 if ! grep -q '# GoliTube persistence' /etc/redis/redis.conf; then
     cat >> /etc/redis/redis.conf <<'CONF'

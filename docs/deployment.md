@@ -7,6 +7,7 @@
 - `/opt/golitube/releases/<commit SHA>/golitube` 保存各版本程序，`current` 指向当前版本。
 - `/etc/golitube/app.env` 保存应用配置，`dependencies.env` 保存随机生成的数据库密码，均由 root 管理，权限 600。
 - MySQL 和 Kafka 使用 Docker 命名卷，端口绑定 `127.0.0.1`。Redis 也只监听本机，使用 AOF、每秒 fsync 和 `noeviction`，内存上限 256 MB。
+- 安装脚本设置 `GOLITUBE_TRUST_LOOPBACK_PROXY=1`。账号限流只在直连来源为回环地址时接受 Nginx 覆盖写入的 `X-Real-IP`，Go 监听地址保持 `127.0.0.1:8081`。直接来自外部的转发头不会被信任。
 - Redis 达到内存上限时可能拒绝新增写入，应用会返回不可用。AOF 每秒同步仍存在故障时丢失最近写入的窗口，备份与恢复演练需要另行安排。[Redis 持久化说明](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/)
 - Kafka 每分区日志保留上限设为 256 MiB，时间上限 7 天。消费者长时间落后可能超过保留窗口。当前单节点配置用于演示，容量未压测。
 
