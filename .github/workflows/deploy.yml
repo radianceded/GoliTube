@@ -1,0 +1,67 @@
+name: Test and deploy GoliTube
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: golitube-${{ github.event_name == 'pull_request' && github.ref || 'production' }}
+  cancel-in-progress: false
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      redis:
+        image: redis:7.0-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Start test dependencies
+        run: |
+          docker compose up -d --wait kafka mysql
+          docker compose run --rm kafka-init
+          docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -e "CREATE DATABASE IF NOT EXISTS golitube_test; GRANT ALL ON golitube_test.* TO '\''golitube'\''@'\''%'\'';"'
+      - name: Test with real Redis, MySQL and Kafka
+        env:
+          GOLITUBE_TEST_REDIS_ADDR: 127.0.0.1:6379
+          GOLITUBE_TEST_MYSQL_DSN: golitube:golitube-local@tcp(127.0.0.1:13306)/golitube_test
+          GOLITUBE_TEST_KAFKA_BROKERS: 127.0.0.1:19092
+        run: |
+          go test -race -count=1 -timeout 180s ./...
+          go vet ./...
+          for script in deploy/*.sh; do bash -n "$script"; done
+          MYSQL_ROOT_PASSWORD=test MYSQL_PASSWORD=test docker compose -f deploy/compose.yaml config --quiet
+      - name: Build Linux release
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -trimpath -buildvcs=false -o build/golitube .
+      - name: Deploy main to Tencent Cloud
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          DEPLOY_HOST: ${{ secrets.GOLITUBE_DEPLOY_HOST }}
+          DEPLOY_KEY: ${{ secrets.GOLITUBE_DEPLOY_KEY }}
+          HOST_KEY: ${{ secrets.GOLITUBE_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/golitube
+          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          trap 'rm -f ~/.ssh/golitube' EXIT
+          options=(-i ~/.ssh/golitube -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15)
+          ssh "${options[@]}" "golitube-deploy@$DEPLOY_HOST" "upload $GITHUB_SHA" < build/golitube
+          ssh "${options[@]}" "golitube-deploy@$DEPLOY_HOST" "deploy $GITHUB_SHA"
