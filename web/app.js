@@ -5,6 +5,7 @@ const state = {
   user: null, authReady: false, authBusy: false, authMode: "login", identityVersion: 0,
   room: "1001", targetRoom: null, socket: null, reconnectTimer: null, retries: 0,
   received: 0, liveIDs: new Set(),
+  onlineTimer: null, onlineAbort: null,
   historyVersion: 0, historyAbort: null, historyQuery: null, cursor: "", historyIDs: new Set(),
 };
 
@@ -162,11 +163,51 @@ function setConnection(mode, label) {
 }
 
 function closeSocket() {
+  stopOnline();
   clearTimeout(state.reconnectTimer);
   state.reconnectTimer = null;
   const previous = state.socket;
   state.socket = null;
   if (previous) previous.close();
+}
+
+function stopOnline() {
+  clearTimeout(state.onlineTimer);
+  state.onlineTimer = null;
+  state.onlineAbort?.abort();
+  state.onlineAbort = null;
+  el("online-count").textContent = "在线连接数待更新";
+}
+
+async function refreshOnline(socket) {
+  if (state.socket !== socket) return;
+  const room = state.room;
+  const controller = new AbortController();
+  state.onlineAbort = controller;
+  try {
+    const params = new URLSearchParams({ room });
+    const response = await fetch("/rooms/online?" + params, {
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(4000)]),
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("online unavailable");
+    const data = await response.json();
+    if (data.room_id !== room || !Number.isSafeInteger(data.online_connections) || data.online_connections < 0) {
+      throw new Error("invalid online count");
+    }
+    if (state.socket === socket && !controller.signal.aborted) {
+      el("online-count").textContent = "在线连接 " + data.online_connections + " · 约每 3 秒更新";
+    }
+  } catch {
+    if (state.socket === socket && !controller.signal.aborted) {
+      el("online-count").textContent = "在线统计暂不可用";
+    }
+  } finally {
+    if (state.socket === socket && state.onlineAbort === controller && !controller.signal.aborted) {
+      state.onlineAbort = null;
+      state.onlineTimer = setTimeout(() => refreshOnline(socket), 3000);
+    }
+  }
 }
 
 function connectSocket() {
@@ -182,6 +223,7 @@ function connectSocket() {
     if (state.socket !== socket) return;
     state.retries = 0;
     setConnection("open", "已连接");
+    refreshOnline(socket);
   });
   socket.addEventListener("message", async (event) => {
     if (state.socket !== socket) return;
@@ -203,6 +245,7 @@ function connectSocket() {
   });
   socket.addEventListener("close", () => {
     if (state.socket !== socket) return;
+    stopOnline();
     state.socket = null;
     if (!state.targetRoom) return;
     const delay = Math.min(1000 * 2 ** Math.min(state.retries++, 5), 15000);
