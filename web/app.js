@@ -6,6 +6,7 @@ const state = {
   room: "1001", targetRoom: null, socket: null, reconnectTimer: null, retries: 0,
   received: 0, liveIDs: new Set(),
   onlineTimer: null, onlineAbort: null,
+  likes: null, likesAbort: null, likeBusy: false, likesUnavailable: false,
   historyVersion: 0, historyAbort: null, historyQuery: null, cursor: "", historyIDs: new Set(),
 };
 
@@ -20,10 +21,10 @@ function statusText(id, message, error = false) {
   el(id).dataset.error = String(error);
 }
 
-async function api(path, body) {
+async function api(path, body, method = "POST") {
   const options = { credentials: "same-origin", signal: AbortSignal.timeout(8000) };
   if (body !== undefined) {
-    options.method = "POST";
+    options.method = method;
     options.headers = { "Content-Type": "application/json" };
     options.body = JSON.stringify(body);
   }
@@ -54,7 +55,82 @@ function renderIdentity() {
   const connected = state.socket?.readyState === WebSocket.OPEN;
   el("send").disabled = !user || !connected || state.authBusy;
   el("send").textContent = !user ? "登录后发送" : !connected ? "请先进入房间" : "发送弹幕";
+  renderLikes();
 }
+
+function renderLikes() {
+  const button = el("room-like");
+  const connected = state.socket?.readyState === WebSocket.OPEN;
+  button.disabled = !connected || !state.user || !state.likes || state.authBusy || state.likeBusy;
+  button.setAttribute("aria-pressed", String(Boolean(state.likes?.liked)));
+  if (!connected) button.textContent = "进入房间后点赞";
+  else if (state.likesUnavailable) button.textContent = "点赞暂不可用";
+  else if (!state.likes) button.textContent = "点赞加载中";
+  else button.textContent = (!state.user ? "登录后点赞" : state.likes.liked ? "已点赞" : "点赞") + " · " + state.likes.likes;
+}
+
+function updateLikes(data, socket) {
+  if (state.socket !== socket) return;
+  if (data.room_id !== state.room || !Number.isSafeInteger(data.likes) || data.likes < 0 || typeof data.liked !== "boolean") {
+    throw new Error("点赞响应无效，请稍后重试。");
+  }
+  state.likes = data;
+  state.likesUnavailable = false;
+  renderLikes();
+}
+
+async function refreshLikes(socket) {
+  if (state.socket !== socket || socket.readyState !== WebSocket.OPEN || state.likeBusy) return;
+  state.likesAbort?.abort();
+  const controller = new AbortController();
+  state.likesAbort = controller;
+  try {
+    const params = new URLSearchParams({ room: state.room });
+    const response = await fetch("/rooms/likes?" + params, {
+      credentials: "same-origin", cache: "no-store",
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(4000)]),
+    });
+    if (!response.ok) throw new Error("likes unavailable");
+    const data = await response.json();
+    if (state.likesAbort === controller && !controller.signal.aborted) updateLikes(data, socket);
+  } catch {
+    if (state.socket === socket && state.likesAbort === controller && !controller.signal.aborted) {
+      state.likes = null;
+      state.likesUnavailable = true;
+      renderLikes();
+    }
+  } finally {
+    if (state.likesAbort === controller) state.likesAbort = null;
+  }
+}
+
+el("room-like").addEventListener("click", async () => {
+  if (el("room-like").disabled) return;
+  const socket = state.socket;
+  const room = state.room;
+  const liked = !state.likes.liked;
+  state.likeBusy = true;
+  // 取消旧的读取，避免它在 PUT 完成后覆盖新状态。
+  state.likesAbort?.abort();
+  state.likesAbort = null;
+  renderLikes();
+  try {
+    const data = await api("/rooms/likes?" + new URLSearchParams({ room }), { liked }, "PUT");
+    updateLikes(data, socket);
+  } catch (error) {
+    if (state.socket === socket) {
+      notify(error.message, true);
+      if (error.status === 401 && !state.authBusy) {
+        await refreshIdentity();
+        if (state.targetRoom) connectSocket();
+      }
+    }
+  } finally {
+    state.likeBusy = false;
+    renderLikes();
+    if (state.socket === socket) refreshLikes(socket);
+  }
+});
 
 async function refreshIdentity() {
   const version = ++state.identityVersion;
@@ -172,6 +248,11 @@ function closeSocket() {
 }
 
 function stopOnline() {
+  state.likesAbort?.abort();
+  state.likesAbort = null;
+  state.likes = null;
+  state.likesUnavailable = false;
+  renderLikes();
   clearTimeout(state.onlineTimer);
   state.onlineTimer = null;
   state.onlineAbort?.abort();
@@ -181,6 +262,7 @@ function stopOnline() {
 
 async function refreshOnline(socket) {
   if (state.socket !== socket) return;
+  refreshLikes(socket);
   const room = state.room;
   const controller = new AbortController();
   state.onlineAbort = controller;

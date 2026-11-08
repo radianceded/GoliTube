@@ -64,7 +64,8 @@ button { border: 0; background: transparent; color: inherit; }
 #room-title { overflow-wrap: anywhere; }
 h2 { font-size: 20px; line-height: 1.4; margin: 0; letter-spacing: -.3px; }
 .room-heading p, .section-heading p { margin: 6px 0 0; font-size: 13px; color: var(--muted); }
-.connection-actions { display: flex; align-items: center; gap: 6px; padding-top: 2px; }
+.connection-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; padding-top: 2px; }
+#room-like[aria-pressed="true"] { background: #e5e5e5; color: var(--ink); }
 .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; border-radius: 14px; background: #f1f1f1; padding: 5px 10px; white-space: nowrap; }
 .status::before, .status-dot { content: ""; height: 6px; width: 6px; background: #999; border-radius: 50%; flex-shrink: 0; }
 .status[data-state="open"] { background: #edf6ee; color: #247131; }
