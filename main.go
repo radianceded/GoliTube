@@ -345,6 +345,15 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 		<-subscriptionDone
 	}()
 	log.Println("Redis 频道订阅成功:", danmakuChannel)
+	presenceDone := make(chan struct{})
+	go func() {
+		defer close(presenceDone)
+		reportRoomPresence(subCtx, rdb)
+	}()
+	defer func() {
+		stopSubscription()
+		<-presenceDone
+	}()
 
 	publish := func(ctx context.Context, event RoomEvent) error {
 		return publishRoomEvent(ctx, rdb, event)

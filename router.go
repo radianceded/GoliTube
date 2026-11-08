@@ -47,6 +47,8 @@ func newRouter(auth *authHandler, query func(context.Context, HistoryQuery) (His
 	historyHandler := handleHistory(query)
 	danmaku := router.Group("/danmaku")
 	danmaku.GET("/history", gin.WrapF(historyHandler))
+	onlineHandler := handleOnline(auth.rdb)
+	router.GET("/rooms/online", gin.WrapF(onlineHandler))
 
 	// 复用原处理函数的 404/405、Allow 和 JSON 错误格式，兼容已有客户端。
 	fallback := func(c *gin.Context) {
@@ -66,6 +68,8 @@ func newRouter(auth *authHandler, query func(context.Context, HistoryQuery) (His
 			websocketHandler(c.Writer, c.Request)
 		case path == "/danmaku/history":
 			historyHandler(c.Writer, c.Request)
+		case path == "/rooms/online":
+			onlineHandler(c.Writer, c.Request)
 		default:
 			serveWebClient(c.Writer, c.Request)
 		}
