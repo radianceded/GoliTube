@@ -29,7 +29,7 @@ ssh ubuntu@"$HOST" 'sudo bash /home/ubuntu/golitube-src/deploy/install.sh'
 
 ## 受限部署密钥
 
-为 Actions 创建独立密钥，部署账号只接受 `upload <40位SHA>` 和 `deploy <40位SHA>`。该账号通过 root 管理的发布脚本安装程序及重启服务，上传内容最终以 `golitube` 运行账号执行。
+为 Actions 创建独立密钥，部署账号只接受 `upload <40位SHA>`、`upload-gzip <40位SHA>` 和 `deploy <40位SHA>`。该账号通过 root 管理的发布脚本安装程序及重启服务，上传内容最终以 `golitube` 运行账号执行。
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/golitube-deploy -N ''
@@ -39,7 +39,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/golitube-deploy -N ''
 } | ssh ubuntu@"$HOST" 'sudo tee /var/lib/golitube-deploy/.ssh/authorized_keys >/dev/null; sudo chown golitube-deploy:golitube-deploy /var/lib/golitube-deploy/.ssh/authorized_keys; sudo chmod 600 /var/lib/golitube-deploy/.ssh/authorized_keys'
 ```
 
-上传与发布入口只接受十六进制提交号，部署加文件锁，限制上传大小为 100 MiB。同一提交号的程序内容不可被不同内容覆盖。保留版本目录便于回滚，需要按磁盘情况清理旧版本。
+上传与发布入口只接受十六进制提交号，部署加文件锁，限制解压后程序大小为 100 MiB。同一提交号的程序内容不可被不同内容覆盖。保留版本目录便于回滚，需要按磁盘情况清理旧版本。Actions 移除调试符号并使用 gzip 传输，以缩短跨境 SSH 链路的上传时间，原始上传入口继续兼容手动发布。
 
 ## GitHub Actions
 
@@ -76,9 +76,9 @@ ssh-keygen -F "$HOST" | sed '/^#/d' | gh secret set GOLITUBE_SSH_HOST_KEY
 首次手动发布同样使用受限入口，以下仍为 Bash 命令。
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -o build/golitube .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags="-s -w" -o build/golitube .
 SHA=$(git rev-parse HEAD)
-ssh -i ~/.ssh/golitube-deploy golitube-deploy@"$HOST" "upload $SHA" < build/golitube
+gzip -1 -c build/golitube | ssh -i ~/.ssh/golitube-deploy golitube-deploy@"$HOST" "upload-gzip $SHA"
 ssh -i ~/.ssh/golitube-deploy golitube-deploy@"$HOST" "deploy $SHA"
 ```
 
