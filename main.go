@@ -374,7 +374,8 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 			return queryHistory(ctx, db, q)
 		})
 	}
-	auth := &authHandler{db: appDB, rdb: rdb, namespace: "golitube", secureCookie: os.Getenv("GOLITUBE_COOKIE_SECURE") == "1"}
+	auth := &authHandler{db: appDB, rdb: rdb, namespace: "golitube", secureCookie: os.Getenv("GOLITUBE_COOKIE_SECURE") == "1",
+		trustLoopbackProxy: os.Getenv("GOLITUBE_TRUST_LOOPBACK_PROXY") == "1"}
 	router := newRouter(auth, history, publish)
 	log.Printf("准备监听 http://%s", addr)
 

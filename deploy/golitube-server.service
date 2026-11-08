@@ -1,0 +1,22 @@
+[Unit]
+Description=GoliTube HTTP and WebSocket server
+After=network-online.target redis-server.service docker.service
+Wants=network-online.target
+
+[Service]
+User=golitube
+Group=golitube
+EnvironmentFile=/etc/golitube/app.env
+WorkingDirectory=/opt/golitube
+ExecStart=/opt/golitube/current/golitube -addr 127.0.0.1:8081 -redis-addr 127.0.0.1:6379 -kafka-brokers 127.0.0.1:19092
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryMax=512M
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

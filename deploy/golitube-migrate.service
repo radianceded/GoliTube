@@ -1,0 +1,15 @@
+[Unit]
+Description=GoliTube schema initialization and history backfill
+After=docker.service
+
+[Service]
+Type=oneshot
+User=golitube
+Group=golitube
+EnvironmentFile=/etc/golitube/app.env
+ExecStart=/opt/golitube/current/golitube -mode migrate-history
+TimeoutStartSec=300
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

@@ -32,6 +32,8 @@
 
 ## 快速开始
 
+腾讯云 Ubuntu 部署、systemd 服务与 GitHub Actions 自动发布见 [部署文档](docs/deployment.md)。
+
 ### 1. 准备环境
 
 - Go 版本满足 [go.mod](go.mod) 的要求，当前为 `1.26.5`。
