@@ -15,7 +15,8 @@
 | 连接治理 | 独立发送队列、单写协程、慢连接淘汰、Ping/Pong 心跳及读写超时 |
 | 跨实例广播 | Redis Pub/Sub 分发房间事件，各 Go 实例向本机同房间连接广播 |
 | 异步持久化 | Kafka 接收事件，独立消费者写入 MySQL，事务提交成功后提交消费位点 |
-| 历史查询 | 按房间及播放位置范围查询，联合索引、游标分页、旧归档回填 |
+| 历史查询 | 按房间及播放位置范围查询，联合索引、游标分页、旧归档回填、常用窗口 Redis 缓存 |
+| 在线统计 | 跨实例汇总在线连接数、实例租约过期回收、网页定时刷新 |
 
 ## 技术栈
 
@@ -23,7 +24,7 @@
 | --- | --- |
 | HTTP 与长连接 | Go、Gin、`net/http`、Gorilla WebSocket |
 | 前端 | 原生 HTML、CSS、JavaScript，通过 Go embed 内嵌提供 |
-| 会话与实时广播 | Redis、go-redis |
+| 会话、缓存与实时状态 | Redis、go-redis |
 | 消息队列 | Kafka、kafka-go |
 | 业务存储 | MySQL、`database/sql` |
 | 本地依赖管理 | Docker Compose |
@@ -52,7 +53,7 @@ docker compose run --rm kafka-init
 
 | 服务 | 本机地址 | 用途 |
 | --- | --- | --- |
-| Redis | `127.0.0.1:6379` | 登录会话、账号限流、实时广播 |
+| Redis | `127.0.0.1:6379` | 登录会话、账号限流、实时广播、历史缓存与在线统计 |
 | Kafka | `127.0.0.1:19092` | 弹幕持久化事件 |
 | MySQL | `127.0.0.1:13306` | 用户、弹幕归档与历史查询 |
 
@@ -125,13 +126,23 @@ flowchart TD
     Kafka -->|消费事件| Persist[独立 persist 进程]
     Persist -->|事务写归档与历史表| DB[(MySQL)]
     Persist -->|事务提交成功后提交位点| Kafka
+    Persist -->|事务提交后切换历史缓存版本| Redis
     API <-->|用户与历史记录| DB
-    API <-->|会话与账号限流| Redis
+    API <-->|会话、限流、历史缓存与在线统计| Redis
+    Instances -->|每 3 秒上报本机连接数| Redis
 ```
 
 Kafka 与 Redis 由接收消息的 Go 流程依次写入。异步处理的是后续 MySQL 保存，实时发送流程会等待 Kafka 确认。
 
 HTTP 入口由 `router.go` 中的 Gin Engine 统一注册，账号接口使用 `/auth` 路由组，历史接口使用 `/danmaku` 路由组。现有处理函数通过 Gin 的适配器接收标准 HTTP 请求，保留严格 JSON 校验、Cookie 与错误响应约定。恢复中间件在处理异常时返回通用错误，并记录方法和路由。原始请求转储被丢弃，以保护 Cookie、令牌等信息。WebSocket 经 Gin 路由交给 Gorilla 升级，发送鉴权仍逐条执行。
+
+### Redis 历史缓存与在线统计
+
+- 历史缓存采用 Cache Aside。只缓存起点对齐 30 秒、长度为 30 或 60 秒的第一页，键包含全部查询条件。非空结果有效期 10 秒，空结果 2 秒，命中不会续期。游标后续页与其他窗口直接查 MySQL。
+- 缓存仅填充 MySQL 已提交的数据。persist 提交事务后切换房间版本，旧查询的并发回填写入旧版本键。版本保留 60 秒，旧页面按自身 TTL 回收。失效操作失败记录日志并继续持久化，短 TTL 限制旧结果存活时间。server 与 persist 必须连接同一 Redis，并同时升级消费者。
+- Redis 缓存读写各使用最多 150 毫秒的预算，缓存异常时回源 MySQL，数据库查询失败不会缓存为空结果。冷缓存的并发请求仍可能同时回源，当前未合并这些请求，也未进行容量压测。
+- 每个 server 使用随机实例身份，每 3 秒快照本机房间连接数，释放房间锁后上报 Redis。Hash 保存各实例计数，ZSET 保存 10 秒租约，Lua 使用 Redis 时钟原子更新与汇总。最后一条连接离开后，下次上报移除本实例贡献。
+- `/rooms/online` 返回尚未过期的连接数。实例停止上报后，其贡献在最后一次成功上报的 10 秒租约到期后被排除。辅助键设置 20 秒 TTL。网页约每 3 秒查询一次，显示存在上报和轮询延迟，同一用户打开两个标签页计为两个连接。统计失败显示暂不可用。
 
 ### 可靠性与连接约定
 
@@ -165,6 +176,7 @@ HTTP 入口由 `router.go` 中的 Gin Engine 统一注册，账号接口使用 `
 | POST | `/auth/logout` | 撤销当前会话并清除 Cookie |
 | GET / WebSocket Upgrade | `/ws?room=1001` | 加入房间、接收与发送弹幕 |
 | GET | `/danmaku/history?room=1001&start_ms=0&end_ms=60000` | 查询播放区间 `[0, 60000)` 的历史弹幕 |
+| GET | `/rooms/online?room=1001` | 返回 `{"room_id":"1001","online_connections":2}`，未知房间返回 0 |
 
 客户端通过 WebSocket 文本帧发送业务字段。
 
@@ -211,12 +223,14 @@ git diff --check
 $env:GOLITUBE_TEST_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube_test'
 $env:GOLITUBE_TEST_REDIS_ADDR = '127.0.0.1:6379'
 go test -race -v -run '^(TestAuthIntegration|TestHistoryIntegration|TestCrossInstanceBroadcast)$' -timeout 60s .
+go test -race -v -run '^(TestHistoryCache.*|TestRoomPresenceAggregation|TestOnlineValidation|TestCrossInstanceOnlineConnections)$' -timeout 60s .
 ```
 
 | 已执行的验证 | 覆盖内容 |
 | --- | --- |
 | 账号与发送鉴权 | 注册登录、游客接收、防伪造作者、退出/过期/轮换后已有连接发送失效 |
 | 跨进程广播 | 两个独立 Go 实例的同房间互通与跨房间隔离 |
+| 历史缓存与在线统计 | 命中、空结果、过期、损坏与 Redis 故障回源；提交后失效、并发旧回填隔离；跨实例连接加入、离开与租约过期 |
 | 持久化与历史 | Kafka 到 MySQL 的完整链路、重复消费幂等、作者一致、游标分页与事务回滚 |
 | 故障恢复 | 专用 Redis 重启后的订阅恢复、会话丢失处理，以及专用 MySQL 重启后的消费补存 |
 | 浏览器交互 | 真实双浏览器会话、注册登录、23 条消息分页、服务重启重连、退出后接收、文本渲染及移动端宽度 |
@@ -239,6 +253,8 @@ danmaku.go          弹幕输入校验与服务端事件生成
 redis.go            跨实例房间事件发布与订阅
 persistence.go      Kafka 生产消费、MySQL 事务与表结构初始化
 history.go          历史查询、游标、查询表投影与归档回填
+history_cache.go    常用历史窗口缓存、短 TTL 与版本失效
+presence.go         在线连接快照、Redis 租约与汇总查询
 schema.sql          用户、弹幕归档及历史查询表
 compose.yaml        Kafka、MySQL 与主题初始化
 docs/               协议、运行说明与故障实验记录
