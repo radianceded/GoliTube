@@ -1,0 +1,35 @@
+name: golitube
+services:
+  kafka:
+    extends:
+      file: ../compose.yaml
+      service: kafka
+    restart: unless-stopped
+    mem_limit: 768m
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+  kafka-init:
+    extends:
+      file: ../compose.yaml
+      service: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--if-not-exists", "--topic", "golitube-danmaku", "--partitions", "3", "--replication-factor", "1", "--config", "retention.ms=604800000", "--config", "retention.bytes=268435456"]
+  mysql:
+    extends:
+      file: ../compose.yaml
+      service: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+    command: ["--innodb-buffer-pool-size=256M", "--max-connections=50", "--binlog-expire-logs-seconds=259200"]
+    restart: unless-stopped
+    mem_limit: 1g
+    logging: *logging
+volumes:
+  kafka-data:
+  mysql-data:
