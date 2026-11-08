@@ -85,16 +85,9 @@ func (a *authHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		authError(w, 405, "method_not_allowed", "请求方法不支持")
 		return
 	}
-	if method == http.MethodPost && r.Header.Get("Origin") != "" {
-		origin, err := url.Parse(r.Header.Get("Origin"))
-		scheme := "http"
-		if a.secureCookie || r.TLS != nil {
-			scheme = "https"
-		}
-		if err != nil || origin.Scheme != scheme || !strings.EqualFold(origin.Host, r.Host) || origin.User != nil || (origin.Path != "" && origin.Path != "/") || origin.RawQuery != "" || origin.Fragment != "" {
-			authError(w, 403, "origin_rejected", "不接受跨站账号操作")
-			return
-		}
+	if method == http.MethodPost && !sameOrigin(r, a.secureCookie) {
+		authError(w, 403, "origin_rejected", "不接受跨站账号操作")
+		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
@@ -144,6 +137,19 @@ func (a *authHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.login(w, r, input)
 		}
 	}
+}
+
+func sameOrigin(r *http.Request, secureCookie bool) bool {
+	if r.Header.Get("Origin") == "" {
+		return true // 允许没有 Origin 的原生客户端。
+	}
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	scheme := "http"
+	if secureCookie || r.TLS != nil {
+		scheme = "https"
+	}
+	return err == nil && origin.Scheme == scheme && strings.EqualFold(origin.Host, r.Host) &&
+		origin.User == nil && (origin.Path == "" || origin.Path == "/") && origin.RawQuery == "" && origin.Fragment == ""
 }
 
 func readCredentials(w http.ResponseWriter, r *http.Request) (credentials, error) {

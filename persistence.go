@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -118,6 +119,10 @@ func newMySQLDB(dsn string) (*sql.DB, error) {
 }
 
 func saveRoomEvent(ctx context.Context, db *sql.DB, event RoomEvent) error {
+	return saveRoomEventWithInvalidation(ctx, db, event, nil)
+}
+
+func saveRoomEventWithInvalidation(ctx context.Context, db *sql.DB, event RoomEvent, invalidate func(context.Context, string) error) error {
 	if event.Data == nil {
 		event.Data = []byte{} // 空 WebSocket 消息保存为空 BLOB，而不是 SQL NULL。
 	}
@@ -141,7 +146,17 @@ func saveRoomEvent(ctx context.Context, db *sql.DB, event RoomEvent) error {
 	if _, err := projectHistory(ctx, tx, stored); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if invalidate != nil {
+		// 使用原归档的房间，重复 ID 的不同载荷不能使另一个房间失效。
+		if err := invalidate(ctx, stored.RoomID); err != nil {
+			// MySQL 已提交。缓存仍有短 TTL，Redis 故障不阻塞后续持久化。
+			log.Println("历史缓存失效失败，等待 TTL 回收:", err)
+		}
+	}
+	return nil
 }
 
 func newEventReader(brokers []string, group string) *kafka.Reader {
@@ -153,7 +168,7 @@ func newEventReader(brokers []string, group string) *kafka.Reader {
 	})
 }
 
-func runPersistence(ctx context.Context, brokers []string, dsn string) error {
+func runPersistence(ctx context.Context, brokers []string, dsn, redisAddr string) error {
 	for _, broker := range brokers {
 		if strings.TrimSpace(broker) == "" {
 			return errors.New("persist 模式必须指定 -kafka-brokers")
@@ -164,11 +179,16 @@ func runPersistence(ctx context.Context, brokers []string, dsn string) error {
 		return err
 	}
 	defer db.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, ContextTimeoutEnabled: true,
+		DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second})
+	defer rdb.Close()
 	reader := newEventReader(brokers, persistenceGroup)
 	defer reader.Close()
 	log.Println("启动弹幕持久化消费者，消费组:", persistenceGroup)
 	err = consumePersistentEvents(ctx, reader.FetchMessage, func(ctx context.Context, event RoomEvent) error {
-		return saveRoomEvent(ctx, db, event)
+		return saveRoomEventWithInvalidation(ctx, db, event, func(ctx context.Context, room string) error {
+			return invalidateHistory(ctx, rdb, room)
+		})
 	}, reader.CommitMessages)
 	if ctx.Err() != nil {
 		return nil

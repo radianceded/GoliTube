@@ -287,7 +287,7 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
 		if *mode == "persist" {
-			err = runPersistence(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"))
+			err = runPersistence(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"), *redisAddr)
 		} else {
 			err = runHistoryBackfill(ctx, os.Getenv("GOLITUBE_MYSQL_DSN"))
 		}
@@ -345,6 +345,15 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 		<-subscriptionDone
 	}()
 	log.Println("Redis 频道订阅成功:", danmakuChannel)
+	presenceDone := make(chan struct{})
+	go func() {
+		defer close(presenceDone)
+		reportRoomPresence(subCtx, rdb)
+	}()
+	defer func() {
+		stopSubscription()
+		<-presenceDone
+	}()
 
 	publish := func(ctx context.Context, event RoomEvent) error {
 		return publishRoomEvent(ctx, rdb, event)
@@ -361,7 +370,9 @@ func runServer(addr, redisAddr string, enqueue func(context.Context, RoomEvent) 
 		}
 		defer db.Close()
 		appDB = db
-		history = func(ctx context.Context, q HistoryQuery) (HistoryPage, error) { return queryHistory(ctx, db, q) }
+		history = cachedHistory(rdb, func(ctx context.Context, q HistoryQuery) (HistoryPage, error) {
+			return queryHistory(ctx, db, q)
+		})
 	}
 	auth := &authHandler{db: appDB, rdb: rdb, namespace: "golitube", secureCookie: os.Getenv("GOLITUBE_COOKIE_SECURE") == "1"}
 	router := newRouter(auth, history, publish)

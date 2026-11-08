@@ -50,8 +50,8 @@
       </div>
 
       <div class="room-heading">
-        <div><h2 id="room-title">房间 1001</h2><p>同一房间，每个人都能收到你的声音。</p></div>
-        <div class="connection-actions"><span id="connection-status" class="status" data-state="idle">未连接</span><button id="leave-room" class="text-button" disabled>离开</button></div>
+        <div><h2 id="room-title">房间 1001</h2><p>同一房间，每个人都能收到你的声音。<span id="online-count" aria-live="polite">在线连接数待更新</span></p></div>
+        <div class="connection-actions"><button id="room-like" class="secondary-button" type="button" aria-pressed="false" title="每个登录用户在每个房间只能点赞一次，可以取消" disabled>进入房间后点赞</button><span id="connection-status" class="status" data-state="idle">未连接</span><button id="leave-room" class="text-button" disabled>离开</button></div>
       </div>
 
       <form id="send-form" class="composer">
