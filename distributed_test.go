@@ -138,13 +138,15 @@ func TestCrossInstanceBroadcast(t *testing.T) {
 	a := dial(first, roomID)
 	send(a, websocket.TextMessage, []byte("ready A"))
 	receive(a, websocket.TextMessage, []byte("ready A"))
+	// 同一订阅按序处理公共频道。另一房间的回声确认第二实例已处理 ready A，
+	// 再加入 B，避免第二实例延迟消费的旧准备消息被当成重复投递。
+	c := dial(second, roomID+"-other")
+	send(c, websocket.TextMessage, []byte("ready C"))
+	receive(c, websocket.TextMessage, []byte("ready C"))
 	b := dial(second, roomID)
 	send(b, websocket.TextMessage, []byte("ready B"))
 	receive(b, websocket.TextMessage, []byte("ready B"))
 	receive(a, websocket.TextMessage, []byte("ready B"))
-	c := dial(second, roomID+"-other")
-	send(c, websocket.TextMessage, []byte("ready C"))
-	receive(c, websocket.TextMessage, []byte("ready C"))
 
 	send(a, websocket.TextMessage, []byte("A to B"))
 	receive(a, websocket.TextMessage, []byte("A to B"))
