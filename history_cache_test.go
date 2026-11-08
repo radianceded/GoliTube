@@ -105,3 +105,39 @@ func TestHistoryCacheEmptyAndFailures(t *testing.T) {
 		t.Fatalf("Redis 故障应回源 calls=%d err=%v", calls, err)
 	}
 }
+
+func TestHistoryCacheInvalidationDuringFill(t *testing.T) {
+	rdb := testRedisClient(t)
+	ctx := t.Context()
+	q := HistoryQuery{RoomID: "cache-race-" + rand.Text(), EndMS: 60000, Limit: 20}
+	oldKey := historyPageKey(q, "0")
+	var newKey string
+	t.Cleanup(func() { rdb.Del(context.Background(), oldKey, newKey, historyVersionKey(q.RoomID)) })
+	calls := 0
+	query := cachedHistory(rdb, func(ctx context.Context, q HistoryQuery) (HistoryPage, error) {
+		calls++
+		if calls == 1 {
+			// 模拟查询已读到旧快照，随后消费者提交数据库并使缓存换代。
+			if err := invalidateHistory(ctx, rdb, q.RoomID); err != nil {
+				t.Fatal(err)
+			}
+			return HistoryPage{Items: []Danmaku{{ID: "old"}}}, nil
+		}
+		return HistoryPage{Items: []Danmaku{{ID: "new"}}}, nil
+	})
+	query(ctx, q)
+	version, err := rdb.Get(ctx, historyVersionKey(q.RoomID)).Result()
+	if err != nil || version == "0" {
+		t.Fatalf("version=%q err=%v", version, err)
+	}
+	newKey = historyPageKey(q, version)
+	for range 2 {
+		page, err := query(ctx, q)
+		if err != nil || len(page.Items) != 1 || page.Items[0].ID != "new" {
+			t.Fatalf("旧查询回填污染了新版本 page=%+v err=%v", page, err)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("换代后回源次数=%d，期望 2", calls)
+	}
+}

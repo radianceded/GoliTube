@@ -287,7 +287,7 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
 		if *mode == "persist" {
-			err = runPersistence(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"))
+			err = runPersistence(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"), *redisAddr)
 		} else {
 			err = runHistoryBackfill(ctx, os.Getenv("GOLITUBE_MYSQL_DSN"))
 		}

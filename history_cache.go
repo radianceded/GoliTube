@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,14 @@ import (
 )
 
 const historyCacheTTL = 10 * time.Second
+
+// 换代后，正在回源的旧查询只能写入旧版本键，无法覆盖新版本结果。
+func invalidateHistory(ctx context.Context, rdb *redis.Client, room string) error {
+	cacheCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancel()
+	// 版本的寿命长于页面 TTL 和查询期限，旧页面会先于版本自动回收。
+	return rdb.Set(cacheCtx, historyVersionKey(room), rand.Text(), time.Minute).Err()
+}
 
 func historyVersionKey(room string) string {
 	return fmt.Sprintf("golitube:history:v1:%x:version", sha256.Sum256([]byte(room)))
