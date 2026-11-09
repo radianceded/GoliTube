@@ -31,6 +31,7 @@ type Danmaku struct {
 	Type        string `json:"type"`
 	ID          string `json:"id"`
 	RoomID      string `json:"room_id"`
+	Username    string `json:"username,omitempty"`
 	UserID      string `json:"user_id,omitempty"` // 旧归档没有作者；新弹幕只能使用会话中的 ID。
 	Content     string `json:"content"`
 	PositionMS  int64  `json:"position_ms"`
@@ -46,8 +47,8 @@ type ProtocolError struct {
 
 func (e *ProtocolError) Error() string { return e.Message }
 
-func decodeDanmaku(roomID string, messageType int, data []byte, userID string) (RoomEvent, error) {
-	if userID == "" {
+func decodeDanmaku(roomID string, messageType int, data []byte, user User) (RoomEvent, error) {
+	if user.ID == "" {
 		return RoomEvent{}, errors.New("弹幕缺少服务端用户身份")
 	}
 	if messageType != websocket.TextMessage || !utf8.Valid(data) {
@@ -81,7 +82,7 @@ func decodeDanmaku(roomID string, messageType int, data []byte, userID string) (
 		return RoomEvent{}, errors.New("color 须为 #RRGGBB 格式")
 	}
 	event := Danmaku{
-		Type: "danmaku", ID: rand.Text(), RoomID: roomID, UserID: userID,
+		Type: "danmaku", ID: rand.Text(), RoomID: roomID, UserID: user.ID, Username: user.Username,
 		Content: input.Content, PositionMS: *input.PositionMS,
 		Color: strings.ToLower(input.Color), CreatedAtMS: time.Now().UnixMilli(),
 	}

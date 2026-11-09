@@ -395,7 +395,7 @@ function messageNode(message, live) {
   const body = document.createElement("div");
   const author = document.createElement("span");
   author.className = "message-author";
-  author.textContent = own ? "我" : message.user_id ? "用户 " + message.user_id.slice(0, 8) : "作者未知";
+  author.textContent = message.username || (own ? state.user.username : "作者未知");
   const meta = document.createElement("span");
   meta.className = "message-meta";
   meta.textContent = live ? playbackPosition(message.position_ms) : new Date(message.created_at_ms).toLocaleString("zh-CN", { hour12: false });

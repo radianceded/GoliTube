@@ -134,7 +134,7 @@ func handleWebSocket(publish func(context.Context, RoomEvent) error, auth *authH
 				log.Println("弹幕发送身份查询失败:", err)
 				return RoomEvent{}, &ProtocolError{Type: "error", Code: "auth_unavailable", Message: "账号服务暂不可用"}
 			}
-			return decodeDanmaku(room, kind, data, user.ID)
+			return decodeDanmaku(room, kind, data, user)
 		})
 	}
 }

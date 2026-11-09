@@ -113,14 +113,15 @@ func handleHistory(query func(context.Context, HistoryQuery) (HistoryPage, error
 }
 
 func queryHistory(ctx context.Context, db *sql.DB, q HistoryQuery) (HistoryPage, error) {
-	statement := `SELECT id, room_id, content, position_ms, color, created_at_ms, user_id
-		FROM danmaku_history WHERE room_id = ? AND position_ms >= ? AND position_ms < ?`
+	statement := `SELECT h.id, h.room_id, h.content, h.position_ms, h.color, h.created_at_ms, h.user_id, COALESCE(u.username, '')
+		FROM danmaku_history h LEFT JOIN users u ON u.id = h.user_id
+		WHERE h.room_id = ? AND h.position_ms >= ? AND h.position_ms < ?`
 	args := []any{q.RoomID, q.StartMS, q.EndMS}
 	if q.AfterID != "" {
-		statement += " AND (position_ms > ? OR (position_ms = ? AND id > ?))"
+		statement += " AND (h.position_ms > ? OR (h.position_ms = ? AND h.id > ?))"
 		args = append(args, q.AfterPositionMS, q.AfterPositionMS, q.AfterID)
 	}
-	statement += " ORDER BY position_ms ASC, id ASC LIMIT ?"
+	statement += " ORDER BY h.position_ms ASC, h.id ASC LIMIT ?"
 	args = append(args, q.Limit+1)
 	rows, err := db.QueryContext(ctx, statement, args...)
 	if err != nil {
@@ -131,7 +132,7 @@ func queryHistory(ctx context.Context, db *sql.DB, q HistoryQuery) (HistoryPage,
 	for rows.Next() {
 		event := Danmaku{Type: "danmaku"}
 		var userID sql.NullString
-		if err := rows.Scan(&event.ID, &event.RoomID, &event.Content, &event.PositionMS, &event.Color, &event.CreatedAtMS, &userID); err != nil {
+		if err := rows.Scan(&event.ID, &event.RoomID, &event.Content, &event.PositionMS, &event.Color, &event.CreatedAtMS, &userID, &event.Username); err != nil {
 			return HistoryPage{}, err
 		}
 		event.UserID = userID.String

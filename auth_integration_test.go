@@ -184,7 +184,7 @@ func TestAuthIntegration(t *testing.T) {
 	}
 	event := <-accepted
 	var danmaku Danmaku
-	if json.Unmarshal(broadcastBody, &danmaku) != nil || danmaku.UserID != registered.User.ID || !bytes.Equal(broadcastBody, event.Data) {
+	if json.Unmarshal(broadcastBody, &danmaku) != nil || danmaku.UserID != registered.User.ID || danmaku.Username != username || !bytes.Equal(broadcastBody, event.Data) {
 		t.Fatal("session identity was not used consistently")
 	}
 	// 此测试显式调用保存函数验证真实 MySQL 投影；Kafka 链路由独立测试覆盖。

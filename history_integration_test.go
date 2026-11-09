@@ -44,6 +44,17 @@ func TestHistoryIntegration(t *testing.T) {
 			}
 		}
 	}()
+	username := strings.ToLower("history_" + rand.Text())
+	if _, err := db.ExecContext(ctx, "INSERT INTO users (id,username,password_hash) VALUES (?,?,?)", room+"-author", username, "unused-test-hash"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cleanupCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stop()
+		if _, err := db.ExecContext(cleanupCtx, "DELETE FROM users WHERE id = ?", room+"-author"); err != nil {
+			t.Error(err)
+		}
+	}()
 	makeEvent := func(suffix string, position int64) RoomEvent {
 		model := Danmaku{Type: "danmaku", ID: room + "-" + suffix, RoomID: room, Content: "弹幕 " + suffix, PositionMS: position, Color: "#ffffff", CreatedAtMS: time.Now().UnixMilli()}
 		if suffix == "1" || suffix == "4" {
@@ -153,6 +164,9 @@ func TestHistoryIntegration(t *testing.T) {
 		var want Danmaku
 		if err := json.Unmarshal(events[i].Data, &want); err != nil {
 			t.Fatal(err)
+		}
+		if want.UserID == room+"-author" {
+			want.Username = username
 		}
 		if !reflect.DeepEqual(event, want) {
 			t.Fatalf("item=%+v want=%+v", event, want)
