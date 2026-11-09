@@ -27,7 +27,7 @@ func testDanmakuPayload(t *testing.T, content string) []byte {
 func handleProtocolWebSocket(publish func(context.Context, RoomEvent) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		serveWebSocketWithDecoder(w, r, pingInterval, pongWait, publish, func(room string, kind int, data []byte) (RoomEvent, error) {
-			return decodeDanmaku(room, kind, data, "protocol-test-user")
+			return decodeDanmaku(room, kind, data, User{ID: "protocol-test-user", Username: "registered_name"})
 		})
 	}
 }
@@ -234,5 +234,24 @@ func TestProtocolErrorAfterConcurrentRemoval(t *testing.T) {
 	case <-finished:
 	case <-time.After(3 * time.Second):
 		t.Fatal("handler did not exit")
+	}
+}
+
+func TestDanmakuUsername(t *testing.T) {
+	user := User{ID: "internal-user-id", Username: "registered_name"}
+	event, err := decodeDanmaku("room", websocket.TextMessage, testDanmakuPayload(t, "hello"), user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message Danmaku
+	if err := json.Unmarshal(event.Data, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.UserID != user.ID || message.Username != user.Username {
+		t.Fatalf("incorrect author: %+v", message)
+	}
+	_, err = decodeDanmaku("room", websocket.TextMessage, []byte(`{"content":"hello","position_ms":0,"username":"forged"}`), user)
+	if err == nil {
+		t.Fatal("client-supplied username was accepted")
 	}
 }
