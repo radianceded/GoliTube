@@ -33,17 +33,17 @@ Kafka 的宿主机地址是 `127.0.0.1:19092`；MySQL 是 `127.0.0.1:13306`。�
 终端 A，启动接收和实时广播服务：
 
 ```powershell
-go run . -addr localhost:8081 -kafka-brokers 127.0.0.1:19092
+go run ./cmd/golitube -addr localhost:8081 -kafka-brokers 127.0.0.1:19092
 ```
 
 终端 B，启动独立持久化消费者：
 
 ```powershell
 $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube'
-go run . -mode persist -kafka-brokers 127.0.0.1:19092
+go run ./cmd/golitube -mode persist -kafka-brokers 127.0.0.1:19092
 ```
 
-消费者启动时要求 MySQL 可连接，自动执行 `schema.sql` 建表，账号需有该库的建表和读写权限。Ctrl+C 停止消费者；再次运行相同命令会使用相同消费组，从已提交位点继续。首次使用该消费组时从 Kafka 尚保留的最早消息开始。
+消费者启动时要求 MySQL 可连接，自动执行 `internal/persistence/schema.sql` 建表，账号需有该库的建表和读写权限。Ctrl+C 停止消费者；再次运行相同命令会使用相同消费组，从已提交位点继续。首次使用该消费组时从 Kafka 尚保留的最早消息开始。
 
 不指定 `-kafka-brokers` 的 server 模式仍是原来的 Redis 广播模式，不保存消息。`/health` 仍只是 HTTP 存活检查，不能证明 Kafka 或 MySQL 已就绪；Kafka 生产者在发送消息时连接，不做启动探测。
 
@@ -104,7 +104,7 @@ go vet ./...
 ```powershell
 $env:GOLITUBE_TEST_KAFKA_BROKERS = '127.0.0.1:19092'
 $env:GOLITUBE_TEST_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube'
-go test -race -v -run '^TestAsyncPersistenceIntegration$' -timeout 90s .
+go test -race -v -run '^TestAsyncPersistenceIntegration$' -timeout 90s ./internal/server
 ```
 
 该测试使用真实 Kafka 与 MySQL，验证先入队后启动消费者、二进制与空消息、写库后模拟位点提交失败并重建 Kafka Reader 时的重放、重复事件只保留一行。这里没有实际杀死 Go 进程。为聚焦持久化底层行为，测试注入原样解码器，将 Redis 转发替换为本地广播；它不代表 `/ws` 接受二进制或空弹幕，正式协议和跨实例行为由其他测试覆盖。
@@ -143,7 +143,7 @@ $env:GOLITUBE_TEST_MYSQL_RESTART = '1'
 $env:GOLITUBE_TEST_REDIS_ADDR = '127.0.0.1:6379'
 $env:GOLITUBE_TEST_KAFKA_BROKERS = '127.0.0.1:19092'
 $env:GOLITUBE_TEST_DOCKER_BIN = 'F:\Docker\Desktop\resources\bin\docker.exe'
-go test -race -v -run '^TestMySQLRestartRecovery$' -timeout 180s .
+go test -race -v -run '^TestMySQLRestartRecovery$' -timeout 180s ./internal/server
 ```
 
 实验使用两个独立的广播子进程、真实 Redis/Kafka、测试进程内的真实持久化消费循环，以及独立 MySQL。测试消费组与房间使用随机名称。生产者复用实际 `runServer`、Kafka 写入和 Redis 发布路径，消费者复用实际读取、重试、数据库事务和位点提交逻辑。

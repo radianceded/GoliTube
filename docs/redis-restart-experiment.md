@@ -12,7 +12,7 @@ Windows Go 后端，Go 1.26.5、go-redis v9.23.0；Redis 7.0.15 在 WSL Ubuntu �
 
 ```powershell
 $env:GOLITUBE_TEST_REDIS_RESTART = '1'
-go test -race -v -run '^TestRedisRestartRecovery$' -timeout 60s .
+go test -race -v -run '^TestRedisRestartRecovery$' -timeout 60s ./internal/server
 ```
 
 本次执行将 GOTMPDIR、TEMP、TMP、GOCACHE 临时指向 D 盘，测试配置路径也位于 D 盘，可通过 WSL 的 `/mnt/d/` 访问。若本机临时目录存在 WSL 访问问题，可按以下方式运行；这些环境变量仅影响当前终端：

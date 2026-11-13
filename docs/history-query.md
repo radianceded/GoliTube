@@ -10,7 +10,7 @@
 
 ```powershell
 $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube'
-go run . -mode migrate-history
+go run ./cmd/golitube -mode migrate-history
 ```
 
 命令幂等，每批最多扫描 200 条归档。重复执行会保留已有历史记录；中途失败可重跑，但会从头扫描。不要同时保留仍只写原归档的旧版消费者，否则扫描游标之前的并发写入可能需要再次回填。
@@ -19,14 +19,14 @@ go run . -mode migrate-history
 
 ```powershell
 $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube'
-go run . -mode persist -kafka-brokers 127.0.0.1:19092
+go run ./cmd/golitube -mode persist -kafka-brokers 127.0.0.1:19092
 ```
 
 在另一个终端启动 HTTP/WebSocket 服务，两个进程使用相同数据库：
 
 ```powershell
 $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube'
-go run . -addr localhost:8081 -kafka-brokers 127.0.0.1:19092
+go run ./cmd/golitube -addr localhost:8081 -kafka-brokers 127.0.0.1:19092
 ```
 
 server 模式不设置 `GOLITUBE_MYSQL_DSN` 时仍可实时广播，历史查询返回 503。设置后创建连接池，但不在启动时等待 MySQL，单次历史查询最多等待 3 秒。缓存未命中且数据库不可用或表尚未初始化时返回 503，仍有效的缓存可以继续返回已有历史。
@@ -103,7 +103,7 @@ persist 消费者在 MySQL 事务提交成功后更新房间版本，版本有�
 go test -race -timeout 30s ./...
 go vet ./...
 $env:GOLITUBE_TEST_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube_test'
-go test -race -v -run '^TestHistoryIntegration$' -timeout 60s .
+go test -race -v -run '^TestHistoryIntegration$' -timeout 60s ./internal/server
 ```
 
 真实数据库测试要求库名以 `_test` 结尾，使用随机房间，只清理自己插入的记录和临时约束。设置 `GOLITUBE_TEST_REDIS_ADDR=127.0.0.1:6379` 后，还会启动真实服务子进程验证路由和数据库配置。
