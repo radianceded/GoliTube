@@ -48,7 +48,7 @@ func TestHistoryIntegration(t *testing.T) {
 			}
 		}
 	}()
-	username := strings.ToLower("history_" + rand.Text())
+	username := strings.ToLower("hist_" + rand.Text())
 	if _, err := db.ExecContext(ctx, "INSERT INTO users (id,username,password_hash) VALUES (?,?,?)", room+"-author", username, "unused-test-hash"); err != nil {
 		t.Fatal(err)
 	}
