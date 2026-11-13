@@ -8,8 +8,8 @@
 
 ```powershell
 $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube'
-go run . -mode migrate-history
-go run . -addr localhost:8081 -kafka-brokers 127.0.0.1:19092
+go run ./cmd/golitube -mode migrate-history
+go run ./cmd/golitube -addr localhost:8081 -kafka-brokers 127.0.0.1:19092
 ```
 
 账号服务使用已有 Redis `127.0.0.1:6379`；服务端需配置上述 MySQL DSN。注册、登录依赖 MySQL 和 Redis，身份查询、退出依赖 Redis。初始化命令不会创建默认账号。
@@ -76,7 +76,7 @@ go test -race -timeout 30s ./...
 go vet ./...
 $env:GOLITUBE_TEST_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube_test'
 $env:GOLITUBE_TEST_REDIS_ADDR = '127.0.0.1:6379'
-go test -race -v -run '^TestAuthIntegration$' -timeout 60s .
+go test -race -v -run '^TestAuthIntegration$' -timeout 60s ./internal/server
 ```
 
 集成测试仅接受 `_test` 数据库，使用随机用户名和独立 Redis 命名空间，退出时清理自己的账号和会话。2026-11-04 已通过真实 MySQL/Redis 测试，测试函数耗时 5.96 秒：注册、重复账号、密码哈希、登录失败统一响应、两个 HTTP 服务共享身份、令牌轮换、退出后重放、过期、HTTPS Cookie 和限流。两个 HTTP 服务运行在同一测试进程，此次没有验证两个独立 Go 进程的账号路由。

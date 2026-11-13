@@ -76,7 +76,7 @@ ssh-keygen -F "$HOST" | sed '/^#/d' | gh secret set GOLITUBE_SSH_HOST_KEY
 首次手动发布同样使用受限入口，以下仍为 Bash 命令。
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags="-s -w" -o build/golitube .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags="-s -w" -o build/golitube ./cmd/golitube
 SHA=$(git rev-parse HEAD)
 gzip -1 -c build/golitube | ssh -i ~/.ssh/golitube-deploy golitube-deploy@"$HOST" "upload-gzip $SHA"
 ssh -i ~/.ssh/golitube-deploy golitube-deploy@"$HOST" "deploy $SHA"

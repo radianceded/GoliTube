@@ -68,7 +68,7 @@ Kafka 与 MySQL 数据保存在 Compose 命名卷中。`docker compose stop` 可
 
 ```powershell
 $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube'
-go run . -mode migrate-history
+go run ./cmd/golitube -mode migrate-history
 ```
 
 已有部署升级时，先停止旧版 persist 消费者，再执行初始化并启动新版服务。命令可重复运行，旧弹幕缺失的作者保留为空。
@@ -79,7 +79,7 @@ go run . -mode migrate-history
 
 ```powershell
 $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube'
-go run . -addr localhost:8081 -redis-addr 127.0.0.1:6379 -kafka-brokers 127.0.0.1:19092
+go run ./cmd/golitube -addr localhost:8081 -redis-addr 127.0.0.1:6379 -kafka-brokers 127.0.0.1:19092
 ```
 
 ### 4. 启动持久化消费者
@@ -88,7 +88,7 @@ go run . -addr localhost:8081 -redis-addr 127.0.0.1:6379 -kafka-brokers 127.0.0.
 
 ```powershell
 $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube'
-go run . -mode persist -kafka-brokers 127.0.0.1:19092
+go run ./cmd/golitube -mode persist -kafka-brokers 127.0.0.1:19092
 ```
 
 ### 5. 打开网页
@@ -111,7 +111,7 @@ go run . -mode persist -kafka-brokers 127.0.0.1:19092
 
 ```powershell
 $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube'
-go run . -addr localhost:8082 -redis-addr 127.0.0.1:6379 -kafka-brokers 127.0.0.1:19092
+go run ./cmd/golitube -addr localhost:8082 -redis-addr 127.0.0.1:6379 -kafka-brokers 127.0.0.1:19092
 ```
 
 分别在 `http://localhost:8081/` 和 `http://localhost:8082/` 进入 `1001` 房间，登录后发送消息，检查两个页面的接收结果。浏览器会话使用相同的主机名，例如始终使用 `localhost`。
@@ -138,7 +138,7 @@ flowchart TD
 
 Kafka 与 Redis 由接收消息的 Go 流程依次写入。异步处理的是后续 MySQL 保存，实时发送流程会等待 Kafka 确认。
 
-HTTP 入口由 `router.go` 中的 Gin Engine 统一注册，账号接口使用 `/auth` 路由组，历史接口使用 `/danmaku` 路由组。现有处理函数通过 Gin 的适配器接收标准 HTTP 请求，保留严格 JSON 校验、Cookie 与错误响应约定。恢复中间件在处理异常时返回通用错误，并记录方法和路由。原始请求转储被丢弃，以保护 Cookie、令牌等信息。WebSocket 经 Gin 路由交给 Gorilla 升级，发送鉴权仍逐条执行。
+HTTP 入口由 `internal/server/router.go` 中的 Gin Engine 统一注册，账号接口使用 `/auth` 路由组，历史接口使用 `/danmaku` 路由组。现有处理函数通过 Gin 的适配器接收标准 HTTP 请求，保留严格 JSON 校验、Cookie 与错误响应约定。恢复中间件在处理异常时返回通用错误，并记录方法和路由。原始请求转储被丢弃，以保护 Cookie、令牌等信息。WebSocket 经 Gin 路由交给 Gorilla 升级，发送鉴权仍逐条执行。
 
 ### Redis 历史缓存与在线统计
 
@@ -236,9 +236,9 @@ git diff --check
 ```powershell
 $env:GOLITUBE_TEST_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube_test'
 $env:GOLITUBE_TEST_REDIS_ADDR = '127.0.0.1:6379'
-go test -race -v -run '^(TestAuthIntegration|TestHistoryIntegration|TestCrossInstanceBroadcast)$' -timeout 60s .
-go test -race -v -run '^(TestHistoryCache.*|TestRoomPresenceAggregation|TestOnlineValidation|TestCrossInstanceOnlineConnections)$' -timeout 60s .
-go test -race -v -run '^TestRoomLikes.*$' -timeout 60s .
+go test -race -v -run '^(TestAuthIntegration|TestHistoryIntegration|TestCrossInstanceBroadcast)$' -timeout 60s ./internal/server
+go test -race -v -run '^(TestHistoryCache.*|TestRoomPresenceAggregation|TestOnlineValidation|TestCrossInstanceOnlineConnections)$' -timeout 60s ./...
+go test -race -v -run '^TestRoomLikes.*$' -timeout 60s ./...
 ```
 
 | 已执行的验证 | 覆盖内容 |
@@ -262,19 +262,16 @@ go test -race -v -run '^TestRoomLikes.*$' -timeout 60s .
 ## 代码入口
 
 ```text
-main.go             启动与依赖装配、房间成员、WebSocket 收发与连接生命周期
-router.go           Gin 路由、接口分组、恢复中间件与 HTTP 兼容处理
-web.go              内嵌页面资源及静态路由
-web/                浏览器页面、样式与交互逻辑
-auth.go             账号、密码哈希、Redis 会话与账号限流
-danmaku.go          弹幕输入校验与服务端事件生成
-redis.go            跨实例房间事件发布与订阅
-persistence.go      Kafka 生产消费、MySQL 事务与表结构初始化
-history.go          历史查询、游标、查询表投影与归档回填
-history_cache.go    常用历史窗口缓存、短 TTL 与版本失效
-presence.go         在线连接快照、Redis 租约与汇总查询
-likes.go            房间点赞、会话鉴权与 Redis 集合原子更新
-schema.sql          用户、弹幕归档及历史查询表
+cmd/golitube/                 命令行参数解析与运行模式分发
+internal/server/              服务启动与依赖装配、Gin 路由、WebSocket 鉴权入口、跨组件集成测试
+internal/realtime/            房间成员、WebSocket 收发与连接生命周期、Redis 跨实例发布订阅、在线人数
+internal/danmaku/             弹幕协议类型、输入校验与服务端事件生成
+internal/auth/                账号、密码哈希、Redis 会话与账号限流
+internal/persistence/         Kafka 生产消费、MySQL 事务、schema.sql 表结构初始化
+internal/history/             历史查询、游标、查询表投影、归档回填与历史窗口缓存
+internal/likes/               房间点赞、会话鉴权与 Redis 集合原子更新
+internal/web/                 内嵌页面资源及静态路由，static/ 为浏览器页面、样式与交互逻辑
+internal/testutil/            测试共用的 Redis 连接、会话与弹幕载荷
 compose.yaml        Kafka、MySQL 与主题初始化
 docs/               协议、运行说明与故障实验记录
 ```
