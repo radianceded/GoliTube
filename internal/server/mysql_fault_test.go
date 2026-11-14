@@ -139,7 +139,7 @@ func TestMySQLRestartRecovery(t *testing.T) {
 				}
 			}
 			return nil
-		})
+		}, nil)
 	}()
 	defer func() {
 		cancel()

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -75,7 +76,7 @@ func TestPersistenceRetryBeforeCommit(t *testing.T) {
 			t.Fatal("committed before save succeeded, or committed another message")
 		}
 		return nil
-	})
+	}, nil)
 	if !errors.Is(err, io.EOF) || !reflect.DeepEqual(calls, []string{"fetch", "save", "save", "commit", "fetch"}) {
 		t.Fatalf("calls=%v err=%v", calls, err)
 	}
@@ -114,7 +115,7 @@ func TestPersistenceStopsWithoutSkipping(t *testing.T) {
 			}, func(context.Context, ...kafka.Message) error {
 				commits++
 				return errors.New("commit unavailable")
-			})
+			}, nil)
 			if err == nil || fetches != 1 {
 				t.Fatalf("fetches=%d err=%v", fetches, err)
 			}
@@ -126,5 +127,87 @@ func TestPersistenceStopsWithoutSkipping(t *testing.T) {
 				t.Fatalf("invalid or unsaved message was committed: saves=%d commits=%d", saves, commits)
 			}
 		})
+	}
+}
+
+// 非法事件转存死信后提交位点，后面的合法弹幕继续保存。
+func TestPersistenceDeadLettersInvalidEvents(t *testing.T) {
+	valid := kafka.Message{Partition: 1, Offset: 4, Key: []byte("room"), Value: []byte(`{"id":"id","room_id":"room","type":1,"data":"aGk="}`)}
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{"bad-json", "{"},
+		{"missing-id", `{"room_id":"room","type":1}`},
+		{"invalid-type", `{"id":"id","room_id":"room","type":9}`},
+		{"oversized-data", `{"id":"id","room_id":"room","type":1,"data":"` + strings.Repeat("QUFB", danmaku.MaxMessageSize) + `"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			poison := kafka.Message{Partition: 1, Offset: 3, Key: []byte("room"), Value: []byte(test.value)}
+			queue := []kafka.Message{poison, valid}
+			var calls []string
+			var deadLettered []kafka.Message
+			err := ConsumeEvents(t.Context(), func(context.Context) (kafka.Message, error) {
+				if len(queue) == 0 {
+					return kafka.Message{}, io.EOF
+				}
+				next := queue[0]
+				queue = queue[1:]
+				return next, nil
+			}, func(_ context.Context, event danmaku.RoomEvent) error {
+				calls = append(calls, "save:"+event.ID)
+				return nil
+			}, func(_ context.Context, messages ...kafka.Message) error {
+				calls = append(calls, "commit:"+strconv.FormatInt(messages[0].Offset, 10))
+				return nil
+			}, func(_ context.Context, message kafka.Message, reason error) error {
+				if reason == nil {
+					t.Error("dead letter without a reason")
+				}
+				calls = append(calls, "dlq")
+				deadLettered = append(deadLettered, message)
+				return nil
+			})
+			want := []string{"dlq", "commit:3", "save:id", "commit:4"}
+			if !errors.Is(err, io.EOF) || !reflect.DeepEqual(calls, want) {
+				t.Fatalf("calls=%v err=%v", calls, err)
+			}
+			if len(deadLettered) != 1 || !reflect.DeepEqual(deadLettered[0], poison) {
+				t.Fatalf("dead-lettered %+v", deadLettered)
+			}
+		})
+	}
+}
+
+// 死信转存失败时不能提交位点，否则坏消息和原因都会丢失；恢复后重试同一条。
+func TestPersistenceDeadLetterRetryBeforeCommit(t *testing.T) {
+	poison := kafka.Message{Partition: 0, Offset: 9, Value: []byte("{")}
+	fetched, attempts := false, 0
+	var calls []string
+	err := ConsumeEvents(t.Context(), func(context.Context) (kafka.Message, error) {
+		if fetched {
+			return kafka.Message{}, io.EOF
+		}
+		fetched = true
+		return poison, nil
+	}, func(context.Context, danmaku.RoomEvent) error {
+		t.Fatal("invalid event reached the database")
+		return nil
+	}, func(_ context.Context, messages ...kafka.Message) error {
+		calls = append(calls, "commit")
+		if attempts != 2 {
+			t.Fatalf("committed after %d dead-letter attempts", attempts)
+		}
+		return nil
+	}, func(context.Context, kafka.Message, error) error {
+		attempts++
+		calls = append(calls, "dlq")
+		if attempts == 1 {
+			return errors.New("kafka unavailable")
+		}
+		return nil
+	})
+	if !errors.Is(err, io.EOF) || !reflect.DeepEqual(calls, []string{"dlq", "dlq", "commit"}) {
+		t.Fatalf("calls=%v err=%v", calls, err)
 	}
 }

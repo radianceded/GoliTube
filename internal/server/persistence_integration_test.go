@@ -119,7 +119,7 @@ func TestAsyncPersistenceIntegration(t *testing.T) {
 	commitFailure := errors.New("simulate exit after database write, before offset commit")
 	err = persistence.ConsumeEvents(ctx, reader.FetchMessage, func(ctx context.Context, got danmaku.RoomEvent) error {
 		return persistence.SaveRoomEvent(ctx, db, got)
-	}, func(context.Context, ...kafka.Message) error { return commitFailure })
+	}, func(context.Context, ...kafka.Message) error { return commitFailure }, nil)
 	reader.Close()
 	if !errors.Is(err, commitFailure) {
 		t.Fatalf("expected simulated commit failure: %v", err)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/radianceded/GoliTube/internal/danmaku"
 	"github.com/radianceded/GoliTube/internal/persistence"
@@ -21,26 +22,26 @@ func main() {
 	brokers := flag.String("kafka-brokers", "", "Kafka 地址，逗号分隔；server 留空时仅实时广播")
 	flag.Parse()
 
+	// systemd 停止服务默认发送 SIGTERM，开发时的 Ctrl+C 是 SIGINT。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	var err error
 	switch *mode {
 	case "server":
 		if *brokers == "" {
-			err = server.Run(*addr, *redisAddr, nil)
+			err = server.Run(ctx, *addr, *redisAddr, nil)
 		} else {
 			writer := persistence.NewEventWriter(strings.Split(*brokers, ","))
-			err = server.Run(*addr, *redisAddr, func(ctx context.Context, event danmaku.RoomEvent) error {
+			err = server.Run(ctx, *addr, *redisAddr, func(ctx context.Context, event danmaku.RoomEvent) error {
 				return persistence.EnqueueRoomEvent(ctx, writer, event)
 			})
 			writer.Close()
 		}
-	case "persist", "migrate-history":
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-		defer stop()
-		if *mode == "persist" {
-			err = persistence.Run(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"), *redisAddr)
-		} else {
-			err = persistence.RunBackfill(ctx, os.Getenv("GOLITUBE_MYSQL_DSN"))
-		}
+	case "persist":
+		err = persistence.Run(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"), *redisAddr)
+	case "migrate-history":
+		err = persistence.RunBackfill(ctx, os.Getenv("GOLITUBE_MYSQL_DSN"))
 	default:
 		err = fmt.Errorf("未知运行模式 %q", *mode)
 	}
