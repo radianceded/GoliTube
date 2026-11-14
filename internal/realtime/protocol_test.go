@@ -247,3 +247,218 @@ func TestDanmakuUsername(t *testing.T) {
 		t.Fatal("client-supplied username was accepted")
 	}
 }
+
+func TestSendLimitsLocalBucket(t *testing.T) {
+	accepted := make(chan danmaku.RoomEvent, 16)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		testHub.ServeWebSocketLimited(w, r, PingInterval, PongWait, func(_ context.Context, event danmaku.RoomEvent) error {
+			accepted <- event
+			return nil
+		}, func(room string, kind int, data []byte) (danmaku.RoomEvent, error) {
+			return danmaku.Decode(room, kind, data, "limited-user", "limited_name")
+		}, SendLimits{Rate: 0.001, Burst: 3, MaxStrikes: 2}) // 测试期间几乎不补充令牌。
+	}))
+	defer server.Close()
+	const room = "send-limit-local"
+	defer waitForRoomCount(t, room, 0)
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"?room="+room, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	send := func() {
+		t.Helper()
+		if err := conn.WriteMessage(websocket.TextMessage, testutil.DanmakuPayload(t, "flood")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func() (danmaku.ProtocolError, error) {
+		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var response danmaku.ProtocolError
+		_, body, err := conn.ReadMessage()
+		if err != nil {
+			return response, err
+		}
+		return response, json.Unmarshal(body, &response)
+	}
+
+	// 桶容量 3：前三条通过，不产生错误回复。
+	for range 3 {
+		send()
+		select {
+		case <-accepted:
+		case <-time.After(3 * time.Second):
+			t.Fatal("限额内的消息没有到达发布器")
+		}
+	}
+	// 之后的消息被拒绝，只回复发送者，不进入发布器；连接保持可用。
+	for range 2 {
+		send()
+		if response, err := read(); err != nil || response.Code != "rate_limited" || response.Type != "error" {
+			t.Fatalf("response=%+v err=%v", response, err)
+		}
+	}
+	if len(accepted) != 0 {
+		t.Fatal("被限流的消息进入了发布器")
+	}
+	// 连续超过 MaxStrikes 次后以 1008 关闭连接。
+	send()
+	_, err = read()
+	if !websocket.IsCloseError(err, websocket.ClosePolicyViolation) {
+		t.Fatalf("expected policy-violation close, got %v", err)
+	}
+	if len(accepted) != 0 {
+		t.Fatal("被限流的消息进入了发布器")
+	}
+}
+
+// 令牌恢复后，被限流的连接可以继续发送，且成功发送会清零连续超限计数。
+func TestSendLimitsRecoverAndResetStrikes(t *testing.T) {
+	accepted := make(chan danmaku.RoomEvent, 16)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		testHub.ServeWebSocketLimited(w, r, PingInterval, PongWait, func(_ context.Context, event danmaku.RoomEvent) error {
+			accepted <- event
+			return nil
+		}, func(room string, kind int, data []byte) (danmaku.RoomEvent, error) {
+			return danmaku.Decode(room, kind, data, "recover-user", "recover_name")
+		}, SendLimits{Rate: 20, Burst: 1, MaxStrikes: 2}) // 每 50ms 补充一个令牌。
+	}))
+	defer server.Close()
+	const room = "send-limit-recover"
+	defer waitForRoomCount(t, room, 0)
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"?room="+room, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for round := range 4 { // 超过 MaxStrikes 的总拒绝次数，但每轮之间都有成功发送。
+		for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(60 * time.Millisecond) {
+			if err := conn.WriteMessage(websocket.TextMessage, testutil.DanmakuPayload(t, "paced")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-accepted:
+			case <-time.After(30 * time.Millisecond):
+				if time.Now().After(deadline) {
+					t.Fatalf("第 %d 轮令牌没有恢复", round)
+				}
+				continue
+			}
+			break
+		}
+		// 紧接着再发一条，必然超限一次。
+		if err := conn.WriteMessage(websocket.TextMessage, testutil.DanmakuPayload(t, "too fast")); err != nil {
+			t.Fatal(err)
+		}
+		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, body, err := conn.ReadMessage()
+		var response danmaku.ProtocolError
+		if err != nil || json.Unmarshal(body, &response) != nil || response.Code != "rate_limited" {
+			t.Fatalf("round %d: body=%q err=%v", round, body, err)
+		}
+	}
+}
+
+func TestCloseAllSendsGoingAway(t *testing.T) {
+	hub := NewHub()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hub.ServeWebSocket(w, r, PingInterval, PongWait, localPublish, rawTestEvent)
+	}))
+	defer server.Close()
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	var conns []*websocket.Conn
+	for _, room := range []string{"shutdown-a", "shutdown-a", "shutdown-b"} {
+		conn, _, err := websocket.DefaultDialer.Dial(url+"?room="+room, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		conns = append(conns, conn)
+	}
+	for deadline := time.Now().Add(3 * time.Second); len(hub.LocalRoomCounts()) != 2; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("连接没有加入房间")
+		}
+	}
+
+	// 客户端在 Close 回调里按协议回复关闭帧，随后服务端读循环退出并清理成员。
+	closed := make(chan int, len(conns))
+	for _, conn := range conns {
+		conn.SetCloseHandler(func(code int, text string) error {
+			closed <- code
+			return conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, ""), time.Now().Add(time.Second))
+		})
+		go func() {
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	hub.CloseAll(ctx)
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("CloseAll 耗时 %v，应在客户端响应后立即返回", elapsed)
+	}
+	for range conns {
+		select {
+		case code := <-closed:
+			if code != websocket.CloseGoingAway {
+				t.Fatalf("close code = %d, want %d", code, websocket.CloseGoingAway)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("客户端没有收到关闭帧")
+		}
+	}
+	if counts := hub.LocalRoomCounts(); len(counts) != 0 {
+		t.Fatalf("CloseAll 返回后仍有成员: %v", counts)
+	}
+
+	// 关闭后不再接纳新连接：握手成功，但立刻收到 1001。
+	late, _, err := websocket.DefaultDialer.Dial(url+"?room=shutdown-late", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer late.Close()
+	late.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := late.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseGoingAway) {
+		t.Fatalf("late connection: %v", err)
+	}
+	if counts := hub.LocalRoomCounts(); len(counts) != 0 {
+		t.Fatalf("关闭后的连接加入了房间: %v", counts)
+	}
+}
+
+// 客户端不响应关闭帧时，CloseAll 在 ctx 到期后强制断开，不会无限等待。
+func TestCloseAllForcesUnresponsiveClients(t *testing.T) {
+	hub := NewHub()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hub.ServeWebSocket(w, r, PingInterval, PongWait, localPublish, rawTestEvent)
+	}))
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"?room=stuck", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close() // 不读取，因此永远不会回复关闭帧。
+	for deadline := time.Now().Add(3 * time.Second); len(hub.LocalRoomCounts()) != 1; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("连接没有加入房间")
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	hub.CloseAll(ctx)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("CloseAll 没有在期限后返回: %v", elapsed)
+	}
+	for deadline := time.Now().Add(3 * time.Second); len(hub.LocalRoomCounts()) != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("强制断开后成员没有清理")
+		}
+	}
+}

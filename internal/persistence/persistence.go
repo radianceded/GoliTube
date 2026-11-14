@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +23,10 @@ import (
 
 const persistenceTopic = "golitube-danmaku"
 const persistenceGroup = "golitube-persistence-v1"
+
+// 无法解析的事件转存到这个 topic，由人工排查。
+const deadLetterTopic = "golitube-danmaku-dlq"
+const deadLetterRetentionMS = "2592000000" // 30 天
 
 //go:embed schema.sql
 var persistenceSchema string
@@ -37,6 +43,70 @@ func NewEventWriter(brokers []string) *kafka.Writer {
 		WriteTimeout: 3 * time.Second,
 		MaxAttempts:  3,
 	}
+}
+
+func NewDeadLetterWriter(brokers []string) *kafka.Writer {
+	writer := NewEventWriter(brokers)
+	writer.Topic = deadLetterTopic
+	writer.Balancer = nil
+	writer.BatchBytes = 10 << 20 // 与 NewEventReader 的 MaxBytes 一致，保证读得到的消息都写得进去。
+	return writer
+}
+
+// 保留原始键和值，并在消息头记录原因与来源位置，便于排查和重放。
+func DeadLetter(ctx context.Context, writer *kafka.Writer, message kafka.Message, reason error) error {
+	return writer.WriteMessages(ctx, kafka.Message{
+		Key:   message.Key,
+		Value: message.Value,
+		Headers: []kafka.Header{
+			{Key: "dlq-reason", Value: []byte(reason.Error())},
+			{Key: "source-topic", Value: []byte(message.Topic)},
+			{Key: "source-partition", Value: []byte(strconv.Itoa(message.Partition))},
+			{Key: "source-offset", Value: []byte(strconv.FormatInt(message.Offset, 10))},
+		},
+	})
+}
+
+// 重复调用安全：topic 已存在时直接返回。生产环境的 Compose 初始化只创建主 topic，
+// 由消费者启动时补建死信 topic，避免发布顺序依赖手工操作。
+// 创建 topic 必须发给集群的 controller，所以先通过任一 broker 查询它的地址。
+func EnsureTopic(ctx context.Context, brokers []string, topic string, config ...kafka.ConfigEntry) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	dialer := &kafka.Dialer{Timeout: 5 * time.Second}
+	var lastErr error
+	for _, broker := range brokers {
+		bootstrap, err := dialer.DialContext(ctx, "tcp", broker)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		controller, err := bootstrap.Controller()
+		bootstrap.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		admin, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		defer admin.Close()
+		if deadline, ok := ctx.Deadline(); ok {
+			admin.SetDeadline(deadline)
+		}
+		err = admin.CreateTopics(kafka.TopicConfig{Topic: topic, NumPartitions: 1, ReplicationFactor: 1, ConfigEntries: config})
+		if err != nil && !errors.Is(err, kafka.TopicAlreadyExists) {
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("无法连接 Kafka 创建 topic %q: %w", topic, lastErr)
+}
+
+func EnsureDeadLetterTopic(ctx context.Context, brokers []string) error {
+	return EnsureTopic(ctx, brokers, deadLetterTopic, kafka.ConfigEntry{ConfigName: "retention.ms", ConfigValue: deadLetterRetentionMS})
 }
 
 func EnqueueRoomEvent(ctx context.Context, writer *kafka.Writer, event danmaku.RoomEvent) error {
@@ -186,12 +256,20 @@ func Run(ctx context.Context, brokers []string, dsn, redisAddr string) error {
 	defer rdb.Close()
 	reader := NewEventReader(brokers, persistenceGroup)
 	defer reader.Close()
-	log.Println("启动弹幕持久化消费者，消费组:", persistenceGroup)
+	// 先建 topic 再消费：死信 topic 不存在时，写入会在遇到第一条坏消息时才失败。
+	if err := EnsureDeadLetterTopic(ctx, brokers); err != nil {
+		return fmt.Errorf("创建死信 topic 失败: %w", err)
+	}
+	deadLetters := NewDeadLetterWriter(brokers)
+	defer deadLetters.Close()
+	log.Println("启动弹幕持久化消费者，消费组:", persistenceGroup, "死信 topic:", deadLetterTopic)
 	err = ConsumeEvents(ctx, reader.FetchMessage, func(ctx context.Context, event danmaku.RoomEvent) error {
 		return saveRoomEventWithInvalidation(ctx, db, event, func(ctx context.Context, room string) error {
 			return history.Invalidate(ctx, rdb, room)
 		})
-	}, reader.CommitMessages)
+	}, reader.CommitMessages, func(ctx context.Context, message kafka.Message, reason error) error {
+		return DeadLetter(ctx, deadLetters, message, reason)
+	})
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -199,39 +277,30 @@ func Run(ctx context.Context, brokers []string, dsn, redisAddr string) error {
 }
 
 // 串行消费：当前消息写入成功并提交后，才处理下一条，防止越过失败消息提交位点。
+// 无法解析或字段非法的事件重试也不会成功，交给 deadLetter 转存后提交位点，不阻塞后面的弹幕。
+// deadLetter 为 nil 时保留旧行为：报错退出并保留位点。
 func ConsumeEvents(ctx context.Context,
 	fetch func(context.Context) (kafka.Message, error),
 	save func(context.Context, danmaku.RoomEvent) error,
 	commit func(context.Context, ...kafka.Message) error,
+	deadLetter func(context.Context, kafka.Message, error) error,
 ) error {
 	for {
 		message, err := fetch(ctx)
 		if err != nil {
 			return err
 		}
-		var event danmaku.RoomEvent
-		if err := json.Unmarshal(message.Value, &event); err != nil {
-			return fmt.Errorf("Kafka 事件解码失败，保留位点 partition=%d offset=%d: %w", message.Partition, message.Offset, err)
-		}
-		if event.ID == "" || len(event.ID) > 128 || event.RoomID == "" || len(event.RoomID) > 128 ||
-			len(event.Data) > danmaku.MaxMessageSize || (event.Type != websocket.TextMessage && event.Type != websocket.BinaryMessage) {
-			return fmt.Errorf("非法 Kafka 事件，保留位点 partition=%d offset=%d", message.Partition, message.Offset)
-		}
-		for {
-			writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			err = save(writeCtx, event)
-			cancel()
-			if err == nil {
-				break
+		event, invalid := decodeEvent(message)
+		if invalid != nil {
+			if deadLetter == nil {
+				return fmt.Errorf("%w，保留位点 partition=%d offset=%d", invalid, message.Partition, message.Offset)
 			}
-			log.Printf("弹幕 %s 保存失败，暂不提交，1 秒后重试: %v", event.ID, err)
-			timer := time.NewTimer(time.Second)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			case <-timer.C:
+			log.Printf("转存非法 Kafka 事件到死信 topic partition=%d offset=%d: %v", message.Partition, message.Offset, invalid)
+			if err := retryUntilDone(ctx, "转存死信", func(ctx context.Context) error { return deadLetter(ctx, message, invalid) }); err != nil {
+				return err
 			}
+		} else if err := retryUntilDone(ctx, "保存弹幕 "+event.ID, func(ctx context.Context) error { return save(ctx, event) }); err != nil {
+			return err
 		}
 		commitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err = commit(commitCtx, message)
@@ -239,6 +308,38 @@ func ConsumeEvents(ctx context.Context,
 		if err != nil {
 			// 写库成功但提交失败：退出后重启可重复消费，主键保证不插入第二行。
 			return fmt.Errorf("提交 Kafka 位点失败: %w", err)
+		}
+	}
+}
+
+func decodeEvent(message kafka.Message) (danmaku.RoomEvent, error) {
+	var event danmaku.RoomEvent
+	if err := json.Unmarshal(message.Value, &event); err != nil {
+		return event, fmt.Errorf("Kafka 事件解码失败: %w", err)
+	}
+	if event.ID == "" || len(event.ID) > 128 || event.RoomID == "" || len(event.RoomID) > 128 ||
+		len(event.Data) > danmaku.MaxMessageSize || (event.Type != websocket.TextMessage && event.Type != websocket.BinaryMessage) {
+		return event, errors.New("非法 Kafka 事件")
+	}
+	return event, nil
+}
+
+// 下游暂时不可用时每秒重试同一个操作，直到成功或 ctx 取消；期间不读取下一条也不提交位点。
+func retryUntilDone(ctx context.Context, what string, operation func(context.Context) error) error {
+	for {
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := operation(opCtx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		log.Printf("%s失败，暂不提交，1 秒后重试: %v", what, err)
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
 		}
 	}
 }

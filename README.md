@@ -174,6 +174,7 @@ HTTP 入口由 `internal/server/router.go` 中的 Gin Engine 统一注册，账�
 | 单次网络写入 | 5 秒超时 |
 | 登录会话 | 固定 24 小时，退出撤销当前会话，重新登录轮换当前令牌 |
 | 注册与登录限流 | 每个直连 IP 共用 60 秒窗口，最多 30 次请求 |
+| 弹幕发送限流 | 每连接每秒补充 2 个令牌、突发 5 条；每用户跨连接每 5 秒最多 10 条 |
 | 历史查询 | 每次最多 60 秒，默认 200 条，最多 500 条，网页默认每页 20 条 |
 
 ## 接口与协议
@@ -267,6 +268,7 @@ internal/server/              服务启动与依赖装配、Gin 路由、WebSock
 internal/realtime/            房间成员、WebSocket 收发与连接生命周期、Redis 跨实例发布订阅、在线人数
 internal/danmaku/             弹幕协议类型、输入校验与服务端事件生成
 internal/auth/                账号、密码哈希、Redis 会话与账号限流
+internal/ratelimit/           基于 Redis 的跨实例固定窗口计数，用于弹幕发送限流
 internal/persistence/         Kafka 生产消费、MySQL 事务、schema.sql 表结构初始化
 internal/history/             历史查询、游标、查询表投影、归档回填与历史窗口缓存
 internal/likes/               房间点赞、会话鉴权与 Redis 集合原子更新
@@ -278,7 +280,7 @@ docs/               协议、运行说明与故障实验记录
 
 ## 后续计划
 
-- 弹幕发送限流与滥用处理。
+- 弹幕发送限流已实现（连接令牌桶加按用户的跨实例窗口，见 [弹幕协议](docs/danmaku-protocol.md)）；封禁、举报等滥用处理仍未做。
 - 视频实体、上传、存储和播放，建立视频与弹幕的关联。
 - 评论、回复与搜索等视频社区功能。
 - 可复现压测、运行指标与基于测量结果的优化。

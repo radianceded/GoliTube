@@ -43,7 +43,7 @@ $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube
 go run ./cmd/golitube -mode persist -kafka-brokers 127.0.0.1:19092
 ```
 
-消费者启动时要求 MySQL 可连接，自动执行 `internal/persistence/schema.sql` 建表，账号需有该库的建表和读写权限。Ctrl+C 停止消费者；再次运行相同命令会使用相同消费组，从已提交位点继续。首次使用该消费组时从 Kafka 尚保留的最早消息开始。
+消费者启动时要求 MySQL 可连接，自动执行 `internal/persistence/schema.sql` 建表，账号需有该库的建表和读写权限。Ctrl+C（SIGINT）或 SIGTERM 停止消费者；再次运行相同命令会使用相同消费组，从已提交位点继续。首次使用该消费组时从 Kafka 尚保留的最早消息开始。
 
 不指定 `-kafka-brokers` 的 server 模式仍是原来的 Redis 广播模式，不保存消息。`/health` 仍只是 HTTP 存活检查，不能证明 Kafka 或 MySQL 已就绪；Kafka 生产者在发送消息时连接，不做启动探测。
 
@@ -83,7 +83,7 @@ docker compose exec mysql mysql -ugolitube -p golitube -e "SELECT id, room_id, m
 - Kafka 入队出错或整个发布流程超过现有的 3 秒期限，发送连接关闭，不继续 Redis 广播。生产者超时可能出现“Kafka 实际收到了，但调用方未收到确认”，不能据此断言消息不存在。
 - Kafka 接收后 Redis 发布失败，发送连接仍会关闭，但已进入 Kafka 的事件仍可能保存。两次写入不在一个事务中，不提供跨 Kafka/Redis 的原子成功；消费者不重放 Redis 广播。
 - 事务提交或位点提交的响应丢失，可能导致重复处理；相同 ID 的数据库写入仍只保留一行。
-- 非法 JSON、缺失 ID 或超限事件会使消费者报错退出并保留位点，避免静默丢弃。该消息会阻塞继续消费，需要人工排查并处理后恢复；尚未实现死信队列。
+- 非法 JSON、缺失 ID 或超限事件无法通过重试修复，会转存到死信 topic `golitube-danmaku-dlq`，之后提交原位点，不阻塞后面的弹幕。死信消息保留原始键和内容，消息头 `dlq-reason`、`source-topic`、`source-partition`、`source-offset` 记录原因和来源位置，topic 保留 30 天。persist 启动时创建该 topic（已存在则跳过），所以 Kafka 在启动时不可用会让 persist 退出并由 systemd 重启。转存本身失败时（例如 Kafka 不可用）与写库失败相同：每秒重试同一条，不提交位点。死信 topic 目前没有重放工具和告警，需要人工查看：`kafka-console-consumer.sh --topic golitube-danmaku-dlq --from-beginning --property print.headers=true`。
 - 消费者逐条写库，任何一条持续失败都会阻塞这个进程的后续消费。尚未批量写入或按分区并行处理。
 - 数据库停机超过 topic 保留时间，或 Kafka 单节点磁盘丢失，都可能导致未入库任务丢失。`RequireAll` 不能给单副本配置增加额外副本。
 - 已增加 [历史记录查询 API](history-query.md)，同一事务保存归档和查询记录；客户端接收确认、客户端重试去重、压测与高可用部署尚未实现。

@@ -32,7 +32,7 @@ func TestRedisInstanceProcess(t *testing.T) {
 			return persistence.EnqueueRoomEvent(ctx, writer, event)
 		}
 	}
-	if err := Run(os.Getenv("GOLITUBE_INSTANCE_ADDR"), os.Getenv("GOLITUBE_TEST_REDIS_ADDR"), enqueue); err != nil {
+	if err := Run(context.Background(), os.Getenv("GOLITUBE_INSTANCE_ADDR"), os.Getenv("GOLITUBE_TEST_REDIS_ADDR"), enqueue); err != nil {
 		t.Fatal(err)
 	}
 }

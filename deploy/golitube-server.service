@@ -11,6 +11,8 @@ WorkingDirectory=/opt/golitube
 ExecStart=/opt/golitube/current/golitube -addr 127.0.0.1:8081 -redis-addr 127.0.0.1:6379 -kafka-brokers 127.0.0.1:19092
 Restart=on-failure
 RestartSec=3
+# 程序收到 SIGTERM 后最多用 10 秒通知 WebSocket 客户端并退出，留出余量再由 systemd 强制终止。
+TimeoutStopSec=20
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
