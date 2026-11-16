@@ -258,7 +258,7 @@ go test -race -v -run '^TestRoomLikes.*$' -timeout 60s ./...
 
 2026-11-08 补充双实例浏览器验证，覆盖在线租约回收、点赞刷新保留、两账号累加与取消、跨实例总数同步和移动端宽度。点赞 GET/PUT 的 503 提示与恢复使用模拟 HTTP 响应验证。
 
-当前部署与实验使用单节点中间件。吞吐量、最大连接数、P95/P99 和资源消耗属于后续压测记录项。上表中的消息数量与配置参数用于说明测试范围。
+当前部署与实验使用单节点中间件。容量压测的方法、环境记录与本轮结果见 [容量压测](docs/loadtest.md)；完整 30 分钟复测尚未执行。上表中的消息数量与配置参数用于说明测试范围。
 
 故障实验、测试开关和实际观察见 [异步持久化](docs/async-persistence.md) 与 [Redis 停服恢复](docs/redis-restart-experiment.md)。
 
@@ -266,6 +266,7 @@ go test -race -v -run '^TestRoomLikes.*$' -timeout 60s ./...
 
 ```text
 cmd/golitube/                 命令行参数解析与运行模式分发
+cmd/loadtest/                 WebSocket 压测客户端：连接/房间/速率/延迟分位与缺失统计
 internal/server/              服务启动与依赖装配、Gin 路由、WebSocket 鉴权入口、跨组件集成测试
 internal/realtime/            房间成员、WebSocket 收发与连接生命周期、Redis 跨实例发布订阅、在线人数
 internal/danmaku/             弹幕协议类型、输入校验与服务端事件生成
@@ -277,6 +278,7 @@ internal/likes/               房间点赞、会话鉴权与 Redis 集合原子�
 internal/web/                 内嵌页面资源及静态路由，static/ 为浏览器页面、样式与交互逻辑
 internal/testutil/            测试共用的 Redis 连接、会话与弹幕载荷
 compose.yaml        Kafka、MySQL 与主题初始化
+deploy/loadtest/    压测专用 Compose、指标采集与档位运行脚本
 docs/               协议、运行说明与故障实验记录
 ```
 

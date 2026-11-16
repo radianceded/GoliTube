@@ -147,11 +147,12 @@ type Stats struct {
 	unauthenticated atomic.Int64
 	serverErrors    atomic.Int64
 
-	shuttingDown atomic.Bool
-	phase        atomic.Value
-	start        time.Time
-	measureStart atomic.Int64
-	alive        atomic.Int64
+	shuttingDown  atomic.Bool
+	sendingPaused atomic.Bool
+	phase         atomic.Value
+	start         time.Time
+	measureStart  atomic.Int64
+	alive         atomic.Int64
 
 	rooms []*Room
 	conns []*Conn
@@ -183,6 +184,15 @@ func (s *Stats) Phase() string {
 }
 
 func (s *Stats) BeginMeasurement() {
+	// 先暂停发送并排空发送队列：否则切换瞬间仍在途的消息会在旧统计里记一次发送，
+	// 到达时又因为序号不晚于新起点而被忽略，表现为每条连接恒定少一条。
+	s.sendingPaused.Store(true)
+	drainDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(drainDeadline) && s.sendersBusy() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+
 	s.epochSeq.Store(s.nextSeq.Load())
 	for _, room := range s.rooms {
 		room.Sent.Store(0)
@@ -206,6 +216,17 @@ func (s *Stats) BeginMeasurement() {
 	s.serverErrors.Store(0)
 	s.lat.Reset()
 	s.measureStart.Store(time.Now().UnixNano())
+	s.sendingPaused.Store(false)
+}
+
+// sendersBusy 表示仍有发送连接的消息留在本地队列，尚未写进 WebSocket。
+func (s *Stats) sendersBusy() bool {
+	for _, conn := range s.conns {
+		if conn.Sender && len(conn.SendCh) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Stats) handleMessage(conn *Conn, data []byte) {

@@ -142,9 +142,34 @@ function Get-ContainerStats {
   return $result
 }
 
+function Get-ServerMetrics {
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $metrics = Invoke-RestMethod -Uri "http://127.0.0.1:18081/debug/metrics" -TimeoutSec 3
+  } finally {
+    $ErrorActionPreference = $previous
+  }
+  [pscustomobject]@{
+    Connections   = $metrics.connections.current
+    Goroutines    = $metrics.runtime.goroutines
+    HeapMB        = [math]::Round($metrics.runtime.heap_alloc_bytes / 1MB, 1)
+    GCCount       = $metrics.runtime.gc_count
+    Publishes     = $metrics.messages.publishes
+    Deliveries    = $metrics.messages.deliveries
+    SlowEvictions = $metrics.messages.slow_conn_evictions
+    RateLimited   = $metrics.messages.rate_limited
+    Queued        = $metrics.messages.queued_messages
+    PublishP99    = $metrics.publish_latency.p99_ms
+  }
+}
+
 $header = @(
   "time", "elapsed_s",
   "server_cpu_pct", "server_rss_mb", "server_threads",
+  "server_conns", "server_goroutines", "server_heap_mb", "server_gc_count",
+  "server_publishes", "server_deliveries", "server_slow_evictions", "server_rate_limited",
+  "server_queued", "server_publish_p99_ms",
   "load_cpu_pct", "load_rss_mb", "load_threads",
   "redis_cpu_pct", "redis_mem_mb", "redis_ops_per_s", "redis_publish_us",
   "kafka_cpu_pct", "kafka_mem_mb", "kafka_lag",
@@ -172,9 +197,11 @@ while ($true) {
   $redis = $null
   $kafka = $null
   $mysql = $null
+  $serverMetrics = $null
   $stats = @{}
 
   try { $server = Get-ProcessSample -ProcessId $ServerPid } catch { $errorText += "server:$($_.Exception.Message);" }
+  try { $serverMetrics = Get-ServerMetrics } catch { $errorText += "metrics:$($_.Exception.Message);" }
   try {
     $loadProcess = Get-Process -Name "loadtest" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($loadProcess) { $client = Get-ProcessSample -ProcessId $loadProcess.Id }
@@ -204,6 +231,16 @@ while ($true) {
     server_cpu_pct = $serverCpu
     server_rss_mb = if ($server) { $server.WorkingSetMB } else { $null }
     server_threads = if ($server) { $server.Threads } else { $null }
+    server_conns = if ($serverMetrics) { $serverMetrics.Connections } else { $null }
+    server_goroutines = if ($serverMetrics) { $serverMetrics.Goroutines } else { $null }
+    server_heap_mb = if ($serverMetrics) { $serverMetrics.HeapMB } else { $null }
+    server_gc_count = if ($serverMetrics) { $serverMetrics.GCCount } else { $null }
+    server_publishes = if ($serverMetrics) { $serverMetrics.Publishes } else { $null }
+    server_deliveries = if ($serverMetrics) { $serverMetrics.Deliveries } else { $null }
+    server_slow_evictions = if ($serverMetrics) { $serverMetrics.SlowEvictions } else { $null }
+    server_rate_limited = if ($serverMetrics) { $serverMetrics.RateLimited } else { $null }
+    server_queued = if ($serverMetrics) { $serverMetrics.Queued } else { $null }
+    server_publish_p99_ms = if ($serverMetrics) { $serverMetrics.PublishP99 } else { $null }
     load_cpu_pct = $loadCpu
     load_rss_mb = if ($client) { $client.WorkingSetMB } else { $null }
     load_threads = if ($client) { $client.Threads } else { $null }

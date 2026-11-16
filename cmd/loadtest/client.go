@@ -160,6 +160,9 @@ func (r *Room) runScheduler(ctx context.Context, stats *Stats, cfg *Config) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if stats.sendingPaused.Load() {
+				continue
+			}
 			seq := stats.nextSeq.Add(1)
 			stats.ring.Mark(seq, r.Index)
 			payload := buildPayload(seq, cfg.MsgSize)

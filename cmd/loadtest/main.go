@@ -298,8 +298,13 @@ func writeSummaries(stop <-chan struct{}, stats *Stats, cfg *Config, writers *re
 			if seconds <= 0 {
 				seconds = 1
 			}
-			current.WindowSendPerSecond = float64(current.Sent-previous.Sent) / seconds
-			current.WindowReceivePerSecond = float64(current.Received-previous.Received) / seconds
+			// 预热切换到正式统计会清零计数器，此时窗口速率按 0 处理。
+			if current.Sent >= previous.Sent {
+				current.WindowSendPerSecond = float64(current.Sent-previous.Sent) / seconds
+			}
+			if current.Received >= previous.Received {
+				current.WindowReceivePerSecond = float64(current.Received-previous.Received) / seconds
+			}
 			writers.WriteRow(current)
 			log.Printf("[%s] 存活=%d 发送=%.0f/s 接收=%.0f/s 预期=%d 缺失=%.3f%% 重复=%d P50=%.1fms P95=%.1fms P99=%.1fms 断连=%d 限流=%d 发送丢弃=%d",
 				current.Phase, current.Connections, current.WindowSendPerSecond, current.WindowReceivePerSecond,
