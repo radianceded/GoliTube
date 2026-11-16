@@ -72,7 +72,7 @@ docker compose exec mysql mysql -ugolitube -p golitube -e "SELECT id, room_id, m
 
 消费位点表示“这个消费组处理到哪里”。如果先提交位点再写数据库，中间进程崩溃，下次就可能跳过一条未保存的消息。
 
-当前每次只处理一条：读取 → 数据库事务提交 → 提交该条 Kafka 位点 → 下一条。写库失败每秒重试同一个事件，不读取下一条，也不提交位点。提交位点失败则退出，重启消费者后允许再次读取未提交事件。
+当前按批处理：读取一批 → 同一数据库事务批量写归档和历史投影 → 坏消息成功转存死信 → 提交这一批各分区的消费位点。默认最多 100 条，首条消息到达后最多等待 50ms 收集；原始载荷达到 1MiB 后也结束收集，最多额外接收一条消息。`-persist-batch` 可设置为 1～1000，设为 1 时逐条处理。写库失败每秒重试同一批，不读取下一批，也不提交位点。提交位点失败则退出，重启后通过事件 ID 幂等处理重复消息。退出时尚未确认的内存批次保留消费位点，重启后重新读取。
 
 如果数据库已经提交，进程在提交位点前崩溃，重启后会再次收到同一个事件。`danmaku.id` 是主键，SQL 使用 `ON DUPLICATE KEY UPDATE id = id`，重复 ID 保留原来的记录，不插入第二行。这是针对相同事件 ID 的幂等写入，不是整条链路的 exactly-once 保证。
 
@@ -84,7 +84,7 @@ docker compose exec mysql mysql -ugolitube -p golitube -e "SELECT id, room_id, m
 - Kafka 接收后 Redis 发布失败，发送连接仍会关闭，但已进入 Kafka 的事件仍可能保存。两次写入不在一个事务中，不提供跨 Kafka/Redis 的原子成功；消费者不重放 Redis 广播。
 - 事务提交或位点提交的响应丢失，可能导致重复处理；相同 ID 的数据库写入仍只保留一行。
 - 非法 JSON、缺失 ID 或超限事件无法通过重试修复，会转存到死信 topic `golitube-danmaku-dlq`，之后提交原位点，不阻塞后面的弹幕。死信消息保留原始键和内容，消息头 `dlq-reason`、`source-topic`、`source-partition`、`source-offset` 记录原因和来源位置，topic 保留 30 天。persist 启动时创建该 topic（已存在则跳过），所以 Kafka 在启动时不可用会让 persist 退出并由 systemd 重启。转存本身失败时（例如 Kafka 不可用）与写库失败相同：每秒重试同一条，不提交位点。死信 topic 目前没有重放工具和告警，需要人工查看：`kafka-console-consumer.sh --topic golitube-danmaku-dlq --from-beginning --property print.headers=true`。
-- 消费者逐条写库，任何一条持续失败都会阻塞这个进程的后续消费。尚未批量写入或按分区并行处理。
+- 消费者串行处理批次，批次内任意数据库写入失败都会回滚整个事务，并阻塞后续消费。合法消息落库和坏消息转存均成功后，才提交各分区的最高消费位点。尚未按分区并行处理。
 - 数据库停机超过 topic 保留时间，或 Kafka 单节点磁盘丢失，都可能导致未入库任务丢失。`RequireAll` 不能给单副本配置增加额外副本。
 - 已增加 [历史记录查询 API](history-query.md)，同一事务保存归档和查询记录；客户端接收确认、客户端重试去重、压测与高可用部署尚未实现。
 
