@@ -8,13 +8,28 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"github.com/radianceded/GoliTube/internal/danmaku"
+	"github.com/radianceded/GoliTube/internal/metrics"
 	"golang.org/x/time/rate"
 )
+
+// 压测时逐连接日志会把日志本身变成瓶颈，GOLITUBE_QUIET=1 只保留错误与汇总。
+var connectionLogging atomic.Bool
+
+func init() { connectionLogging.Store(true) }
+
+func SetConnectionLogging(enabled bool) { connectionLogging.Store(enabled) }
+
+func logConnection(format string, args ...any) {
+	if connectionLogging.Load() {
+		log.Printf(format, args...)
+	}
+}
 
 const (
 	PingInterval = 25 * time.Second
@@ -65,13 +80,15 @@ func (c *Client) writePump(interval time.Duration) {
 		)
 		// 设置写超时，避免阻塞在慢连接上。
 		if err != nil {
-			log.Println("设置写超时失败:", err)
+			metrics.WriteErrors.Add(1)
+			logConnection("设置写超时失败: %v", err)
 			return
 		}
 
 		err = c.Conn.WriteMessage(message.Type, message.Data)
 		if err != nil {
-			log.Println("发送消息失败:", err)
+			metrics.WriteErrors.Add(1)
+			logConnection("发送消息失败: %v", err)
 			return
 		}
 	}
@@ -149,9 +166,11 @@ func (h *Hub) Broadcast(roomID string, messageType int, message []byte) {
 			Data: message,
 		}:
 			// 成功放入该客户端的发送队列。
+			metrics.Deliveries.Add(1)
 		default:
 			// 队列没有可用位置，移除并断开慢连接。
-			log.Println("发送队列已满，断开连接")
+			metrics.SlowEvictions.Add(1)
+			logConnection("发送队列已满，断开连接")
 			delete(members, conn)
 			close(client.Send)
 			conn.Close()
@@ -161,6 +180,19 @@ func (h *Hub) Broadcast(roomID string, messageType int, message []byte) {
 	if len(members) == 0 {
 		delete(h.rooms, roomID)
 	}
+}
+
+// Queued 返回所有客户端发送队列中尚未写出的消息总数，用于观察广播积压。
+func (h *Hub) Queued() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	total := 0
+	for _, members := range h.rooms {
+		for _, client := range members {
+			total += len(client.Send)
+		}
+	}
+	return total
 }
 
 // SendLimits 描述单个连接上弹幕发送的本地限流。零值表示不限流。
@@ -241,7 +273,8 @@ func (h *Hub) ServeWebSocketLimited(w http.ResponseWriter, r *http.Request, inte
 	h.mu.Unlock()
 	//lock to avoid race condition when adding connection to room and counting connections
 
-	log.Println("WebSocket连接已建立")
+	metrics.ConnectionsTotal.Add(1)
+	metrics.ConnectionsCurrent.Add(1)
 
 	defer func() {
 		h.mu.Lock()
@@ -258,7 +291,8 @@ func (h *Hub) ServeWebSocketLimited(w http.ResponseWriter, r *http.Request, inte
 		}
 
 		h.mu.Unlock()
-		log.Printf("连接移除，房间 %q 在线连接数：%d", roomID, count)
+		metrics.ConnectionsCurrent.Add(-1)
+		logConnection("连接移除，房间 %q 在线连接数：%d", roomID, count)
 	}()
 
 	go client.writePump(interval)
@@ -285,16 +319,18 @@ func (h *Hub) ServeWebSocketLimited(w http.ResponseWriter, r *http.Request, inte
 	}
 	strikes := 0
 
-	log.Printf("连接加入，房间 %q 在线连接数：%d", roomID, count)
+	logConnection("连接加入，房间 %q 在线连接数：%d", roomID, count)
 	for {
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("读取消息失败:", err)
+			metrics.ReadErrors.Add(1)
+			logConnection("读取消息失败: %v", err)
 			return
 		}
 
 		// 限流先于解码和会话查询，超限消息不消耗 Redis 和 Kafka。
 		if bucket != nil && !bucket.Allow() {
+			metrics.RateLimited.Add(1)
 			strikes++
 			if limits.MaxStrikes > 0 && strikes > limits.MaxStrikes {
 				log.Printf("连续超限 %d 次，关闭连接", strikes)

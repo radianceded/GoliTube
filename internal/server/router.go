@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,7 @@ import (
 	"github.com/radianceded/GoliTube/internal/danmaku"
 	"github.com/radianceded/GoliTube/internal/history"
 	"github.com/radianceded/GoliTube/internal/likes"
+	"github.com/radianceded/GoliTube/internal/metrics"
 	"github.com/radianceded/GoliTube/internal/realtime"
 	"github.com/radianceded/GoliTube/internal/web"
 )
@@ -88,4 +90,16 @@ func newRouter(a *auth.Handler, hub *realtime.Hub, query func(context.Context, h
 	router.NoRoute(fallback)
 	router.NoMethod(fallback)
 	return router
+}
+
+// registerDebugRoutes 只在显式设置环境变量时暴露指标和性能剖析端点。
+// 压测脚本用 /debug/metrics 采样；接近瓶颈时用 /debug/pprof 抓 CPU 和锁竞争。
+func registerDebugRoutes(router *gin.Engine, hub *realtime.Hub, metricsEnabled, pprofEnabled bool) {
+	if metricsEnabled {
+		sources := metrics.Sources{Rooms: hub.LocalRoomCounts, Queued: hub.Queued}
+		router.GET("/debug/metrics", gin.WrapH(metrics.Handler(sources)))
+	}
+	if pprofEnabled {
+		router.Any("/debug/pprof/*any", gin.WrapH(http.DefaultServeMux))
+	}
 }
