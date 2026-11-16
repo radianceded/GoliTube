@@ -193,6 +193,44 @@ func Project(ctx context.Context, tx *sql.Tx, event danmaku.RoomEvent) (bool, er
 	return true, err
 }
 
+// ProjectBatch 用一条多行 INSERT 投影一批事件。批量持久化时，逐条 Project 会带来
+// 每条一次网络往返；这里把往返压到每批一次。
+// 非弹幕事件（旧二进制或空消息）只保留归档，不进入查询表。
+func ProjectBatch(ctx context.Context, tx *sql.Tx, events []danmaku.RoomEvent) (int, error) {
+	type projected struct {
+		d      danmaku.Danmaku
+		author sql.NullString
+	}
+	rows := make([]projected, 0, len(events))
+	for _, event := range events {
+		d, ok := toDanmaku(event)
+		if !ok {
+			continue
+		}
+		rows = append(rows, projected{d: d, author: sql.NullString{String: d.UserID, Valid: d.UserID != ""}})
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	var query strings.Builder
+	query.WriteString("INSERT INTO danmaku_history (id,room_id,content,position_ms,color,created_at_ms,user_id) VALUES ")
+	args := make([]any, 0, len(rows)*7)
+	for index, row := range rows {
+		if index > 0 {
+			query.WriteString(",")
+		}
+		query.WriteString("(?,?,?,?,?,?,?)")
+		args = append(args, row.d.ID, row.d.RoomID, row.d.Content, row.d.PositionMS, row.d.Color,
+			row.d.CreatedAtMS, row.author)
+	}
+	// MySQL 8.0.19+ 的行别名；比已废弃的 VALUES(col) 更明确。
+	query.WriteString(" AS incoming ON DUPLICATE KEY UPDATE user_id=COALESCE(danmaku_history.user_id,incoming.user_id)")
+	if _, err := tx.ExecContext(ctx, query.String(), args...); err != nil {
+		return 0, err
+	}
+	return len(rows), nil
+}
+
 func Backfill(ctx context.Context, db *sql.DB) (scanned, eligible int, err error) {
 	lastID := ""
 	for {

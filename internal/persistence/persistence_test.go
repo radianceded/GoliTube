@@ -211,3 +211,86 @@ func TestPersistenceDeadLetterRetryBeforeCommit(t *testing.T) {
 		t.Fatalf("calls=%v err=%v", calls, err)
 	}
 }
+
+// 批量模式：一个事务写一批，位点也只提交这一批的最后一条。
+func TestConsumeBatchesCommitsWholeBatch(t *testing.T) {
+	payloads := make([][]byte, 5)
+	for index := range payloads {
+		payload, err := json.Marshal(danmaku.RoomEvent{ID: "id-" + strconv.Itoa(index), RoomID: "room",
+			Type: websocket.TextMessage, Data: []byte("hi")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		payloads[index] = payload
+	}
+	next := 0
+	fetch := func(context.Context) (kafka.Message, error) {
+		if next >= len(payloads) {
+			return kafka.Message{}, io.EOF
+		}
+		message := kafka.Message{Partition: 0, Offset: int64(next), Value: payloads[next]}
+		next++
+		return message, nil
+	}
+	var batches [][]danmaku.RoomEvent
+	var committed [][]kafka.Message
+	err := ConsumeBatches(t.Context(), fetch, func(_ context.Context, events []danmaku.RoomEvent) error {
+		batches = append(batches, append([]danmaku.RoomEvent(nil), events...))
+		return nil
+	}, func(_ context.Context, messages ...kafka.Message) error {
+		committed = append(committed, append([]kafka.Message(nil), messages...))
+		return nil
+	}, nil, 3)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(batches) != 2 || len(batches[0]) != 3 || len(batches[1]) != 2 {
+		t.Fatalf("batches=%d sizes=%d/%d", len(batches), len(batches[0]), len(batches[1]))
+	}
+	if len(committed) != 2 || len(committed[0]) != 3 || len(committed[1]) != 2 || committed[1][1].Offset != 4 {
+		t.Fatalf("committed=%+v", committed)
+	}
+}
+
+// 批次里混入非法事件时，合法事件照常写库，非法事件转存死信，然后整批提交。
+func TestConsumeBatchesDeadLettersInvalid(t *testing.T) {
+	valid, err := json.Marshal(danmaku.RoomEvent{ID: "valid", RoomID: "room", Type: websocket.TextMessage, Data: []byte("hi")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := kafka.Message{Partition: 1, Offset: 11, Value: []byte("{}")}
+	next := 0
+	messages := []kafka.Message{
+		{Partition: 1, Offset: 10, Value: valid},
+		invalid,
+	}
+	fetch := func(context.Context) (kafka.Message, error) {
+		if next >= len(messages) {
+			return kafka.Message{}, io.EOF
+		}
+		message := messages[next]
+		next++
+		return message, nil
+	}
+	saved, deadLettered := 0, 0
+	var committed []kafka.Message
+	err = ConsumeBatches(t.Context(), fetch, func(_ context.Context, events []danmaku.RoomEvent) error {
+		saved += len(events)
+		return nil
+	}, func(_ context.Context, batch ...kafka.Message) error {
+		committed = append(committed, batch...)
+		return nil
+	}, func(_ context.Context, message kafka.Message, reason error) error {
+		if message.Offset != invalid.Offset || reason == nil {
+			t.Fatalf("dead-lettered %+v reason=%v", message, reason)
+		}
+		deadLettered++
+		return nil
+	}, 2)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("err=%v", err)
+	}
+	if saved != 1 || deadLettered != 1 || len(committed) != 2 {
+		t.Fatalf("saved=%d dead=%d committed=%d", saved, deadLettered, len(committed))
+	}
+}

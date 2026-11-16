@@ -24,6 +24,12 @@ import (
 const persistenceTopic = "golitube-danmaku"
 const persistenceGroup = "golitube-persistence-v1"
 
+// 生产消费入口最多积累 1000 条、每条 Data 不超过 4KiB，限制事务与 SQL 大小。
+const maxBatchSize = 1000
+
+// 达到 1MiB 原始载荷后结束收集，最多额外接收一条消息，限制坏消息批次的内存。
+const maxBatchBytes = 1 << 20
+
 // 无法解析的事件转存到这个 topic，由人工排查。
 const deadLetterTopic = "golitube-danmaku-dlq"
 const deadLetterRetentionMS = "2592000000" // 30 天
@@ -195,36 +201,97 @@ func SaveRoomEvent(ctx context.Context, db *sql.DB, event danmaku.RoomEvent) err
 }
 
 func saveRoomEventWithInvalidation(ctx context.Context, db *sql.DB, event danmaku.RoomEvent, invalidate func(context.Context, string) error) error {
-	if event.Data == nil {
-		event.Data = []byte{} // 空 WebSocket 消息保存为空 BLOB，而不是 SQL NULL。
+	var invalidateRooms func(context.Context, []string) error
+	if invalidate != nil {
+		invalidateRooms = func(ctx context.Context, rooms []string) error {
+			for _, room := range rooms {
+				if err := invalidate(ctx, room); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+	return saveRoomEventsWithInvalidation(ctx, db, []danmaku.RoomEvent{event}, invalidateRooms)
+}
+
+// 一批归档与历史投影在同一个事务中提交。先插入，再读取数据库中的原归档，
+// 保证批内重复、重试及并发冲突都以最初保存的事件为准。
+func saveRoomEventsWithInvalidation(ctx context.Context, db *sql.DB, events []danmaku.RoomEvent, invalidate func(context.Context, []string) error) error {
+	if len(events) == 0 {
+		return nil
+	}
+	if len(events) > maxBatchSize {
+		return fmt.Errorf("批次不能超过 %d 条", maxBatchSize)
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO danmaku (id, room_id, message_type, data)
-		VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = id`,
-		event.ID, event.RoomID, event.Type, event.Data)
+
+	var query strings.Builder
+	query.WriteString("INSERT INTO danmaku (id, room_id, message_type, data) VALUES ")
+	args := make([]any, 0, len(events)*4)
+	ids := make([]any, 0, len(events))
+	seenIDs := make(map[string]bool, len(events))
+	for _, event := range events {
+		if seenIDs[event.ID] {
+			continue
+		}
+		seenIDs[event.ID] = true
+		if len(ids) > 0 {
+			query.WriteString(",")
+		}
+		query.WriteString("(?,?,?,?)")
+		data := event.Data
+		if data == nil {
+			data = []byte{}
+		}
+		args = append(args, event.ID, event.RoomID, event.Type, data)
+		ids = append(ids, event.ID)
+	}
+	query.WriteString(" ON DUPLICATE KEY UPDATE id = id")
+	if _, err := tx.ExecContext(ctx, query.String(), args...); err != nil {
+		return err
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	// 锁定读使用当前已保存的行，不依赖事务快照或客户端提交的重复载荷。
+	rows, err := tx.QueryContext(ctx, "SELECT id, room_id, message_type, data FROM danmaku WHERE id IN ("+placeholders+") FOR UPDATE", ids...)
 	if err != nil {
 		return err
 	}
-	// 重复 ID 以原归档为准，避免重试载荷不同导致两张表内容不一致。
-	stored := danmaku.RoomEvent{ID: event.ID}
-	if err := tx.QueryRowContext(ctx, "SELECT room_id, message_type, data FROM danmaku WHERE id = ?", event.ID).
-		Scan(&stored.RoomID, &stored.Type, &stored.Data); err != nil {
-		return err
+	stored := make([]danmaku.RoomEvent, 0, len(ids))
+	for rows.Next() {
+		var event danmaku.RoomEvent
+		if err := rows.Scan(&event.ID, &event.RoomID, &event.Type, &event.Data); err != nil {
+			rows.Close()
+			return err
+		}
+		stored = append(stored, event)
 	}
-	if _, err := history.Project(ctx, tx, stored); err != nil {
+	readErr := rows.Err()
+	rows.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if _, err := history.ProjectBatch(ctx, tx, stored); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	if invalidate != nil {
-		// 使用原归档的房间，重复 ID 的不同载荷不能使另一个房间失效。
-		if err := invalidate(ctx, stored.RoomID); err != nil {
-			// MySQL 已提交。缓存仍有短 TTL，Redis 故障不阻塞后续持久化。
+		rooms := make([]string, 0, len(stored))
+		seen := make(map[string]bool, len(stored))
+		for _, event := range stored {
+			if !seen[event.RoomID] {
+				seen[event.RoomID] = true
+				rooms = append(rooms, event.RoomID)
+			}
+		}
+		if err := invalidate(ctx, rooms); err != nil {
 			log.Println("历史缓存失效失败，等待 TTL 回收:", err)
 		}
 	}
@@ -240,7 +307,10 @@ func NewEventReader(brokers []string, group string) *kafka.Reader {
 	})
 }
 
-func Run(ctx context.Context, brokers []string, dsn, redisAddr string) error {
+func Run(ctx context.Context, brokers []string, dsn, redisAddr string, batchSize int) error {
+	if batchSize < 1 || batchSize > maxBatchSize {
+		return fmt.Errorf("persist-batch 必须为 1～%d", maxBatchSize)
+	}
 	for _, broker := range brokers {
 		if strings.TrimSpace(broker) == "" {
 			return errors.New("persist 模式必须指定 -kafka-brokers")
@@ -262,14 +332,14 @@ func Run(ctx context.Context, brokers []string, dsn, redisAddr string) error {
 	}
 	deadLetters := NewDeadLetterWriter(brokers)
 	defer deadLetters.Close()
-	log.Println("启动弹幕持久化消费者，消费组:", persistenceGroup, "死信 topic:", deadLetterTopic)
-	err = ConsumeEvents(ctx, reader.FetchMessage, func(ctx context.Context, event danmaku.RoomEvent) error {
-		return saveRoomEventWithInvalidation(ctx, db, event, func(ctx context.Context, room string) error {
-			return history.Invalidate(ctx, rdb, room)
+	log.Printf("启动弹幕持久化消费者，消费组: %s 批量: %d 死信 topic: %s", persistenceGroup, batchSize, deadLetterTopic)
+	err = ConsumeBatches(ctx, reader.FetchMessage, func(ctx context.Context, events []danmaku.RoomEvent) error {
+		return saveRoomEventsWithInvalidation(ctx, db, events, func(ctx context.Context, rooms []string) error {
+			return history.InvalidateRooms(ctx, rdb, rooms)
 		})
 	}, reader.CommitMessages, func(ctx context.Context, message kafka.Message, reason error) error {
 		return DeadLetter(ctx, deadLetters, message, reason)
-	})
+	}, batchSize)
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -285,29 +355,103 @@ func ConsumeEvents(ctx context.Context,
 	commit func(context.Context, ...kafka.Message) error,
 	deadLetter func(context.Context, kafka.Message, error) error,
 ) error {
+	return ConsumeBatches(ctx, fetch, func(ctx context.Context, events []danmaku.RoomEvent) error {
+		return save(ctx, events[0])
+	}, commit, deadLetter, 1)
+}
+
+type invalidMessage struct {
+	message kafka.Message
+	reason  error
+}
+
+// ConsumeBatches 按批读取：一个事务写入一批事件，然后一次提交这一批的位点。
+// 达到条数上限或首条消息后 50ms 时写库；只有合法事件落库、坏消息转存成功后才提交。
+// 批次内允许跨分区；CommitMessages 会按分区提交各自的最高位点。
+// fillWindow 用于在低流量时尽快处理已到达的部分批次，避免等满一整批。
+func ConsumeBatches(ctx context.Context,
+	fetch func(context.Context) (kafka.Message, error),
+	save func(context.Context, []danmaku.RoomEvent) error,
+	commit func(context.Context, ...kafka.Message) error,
+	deadLetter func(context.Context, kafka.Message, error) error,
+	batchSize int,
+) error {
+	if batchSize < 1 || batchSize > maxBatchSize {
+		return fmt.Errorf("批量大小必须为 1～%d", maxBatchSize)
+	}
+	const fillWindow = 50 * time.Millisecond
 	for {
-		message, err := fetch(ctx)
+		first, err := fetch(ctx)
 		if err != nil {
 			return err
 		}
-		event, invalid := decodeEvent(message)
-		if invalid != nil {
-			if deadLetter == nil {
-				return fmt.Errorf("%w，保留位点 partition=%d offset=%d", invalid, message.Partition, message.Offset)
+		messages := []kafka.Message{first}
+		batchBytes := len(first.Value) + len(first.Key)
+		events := make([]danmaku.RoomEvent, 0, batchSize)
+		invalid := make([]invalidMessage, 0)
+		add := func(message kafka.Message) {
+			event, reason := decodeEvent(message)
+			if reason != nil {
+				invalid = append(invalid, invalidMessage{message: message, reason: reason})
+				return
 			}
-			log.Printf("转存非法 Kafka 事件到死信 topic partition=%d offset=%d: %v", message.Partition, message.Offset, invalid)
-			if err := retryUntilDone(ctx, "转存死信", func(ctx context.Context) error { return deadLetter(ctx, message, invalid) }); err != nil {
+			events = append(events, event)
+		}
+		add(first)
+
+		var fetchErr error
+		deadline := time.Now().Add(fillWindow)
+		for len(messages) < batchSize && batchBytes < maxBatchBytes {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				break
+			}
+			fillCtx, cancel := context.WithTimeout(ctx, remaining)
+			next, err := fetch(fillCtx)
+			cancel()
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				// 只有本批定时器到期才是正常的部分批次；其他读取错误在处理已读消息后返回。
+				if !errors.Is(err, context.DeadlineExceeded) || time.Now().Before(deadline) {
+					fetchErr = err
+				}
+				break
+			}
+			messages = append(messages, next)
+			batchBytes += len(next.Value) + len(next.Key)
+			add(next)
+		}
+
+		if len(events) > 0 {
+			if err := retryUntilDone(ctx, fmt.Sprintf("批量保存 %d 条弹幕", len(events)), func(ctx context.Context) error {
+				return save(ctx, events)
+			}); err != nil {
 				return err
 			}
-		} else if err := retryUntilDone(ctx, "保存弹幕 "+event.ID, func(ctx context.Context) error { return save(ctx, event) }); err != nil {
-			return err
 		}
+		for _, bad := range invalid {
+			if deadLetter == nil {
+				return fmt.Errorf("%w，保留位点 partition=%d offset=%d", bad.reason, bad.message.Partition, bad.message.Offset)
+			}
+			log.Printf("转存非法 Kafka 事件到死信 topic partition=%d offset=%d: %v", bad.message.Partition, bad.message.Offset, bad.reason)
+			if err := retryUntilDone(ctx, "转存死信", func(ctx context.Context) error {
+				return deadLetter(ctx, bad.message, bad.reason)
+			}); err != nil {
+				return err
+			}
+		}
+
 		commitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err = commit(commitCtx, message)
+		err = commit(commitCtx, messages...)
 		cancel()
 		if err != nil {
 			// 写库成功但提交失败：退出后重启可重复消费，主键保证不插入第二行。
 			return fmt.Errorf("提交 Kafka 位点失败: %w", err)
+		}
+		if fetchErr != nil {
+			return fetchErr
 		}
 	}
 }

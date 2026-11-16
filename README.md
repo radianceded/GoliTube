@@ -91,6 +91,8 @@ $env:GOLITUBE_MYSQL_DSN = 'golitube:golitube-local@tcp(127.0.0.1:13306)/golitube
 go run ./cmd/golitube -mode persist -kafka-brokers 127.0.0.1:19092
 ```
 
+默认每批最多 100 条，首条消息到达后最多等待 50ms 收集同批消息。使用 `-persist-batch` 可设置 1～1000 条，设置为 1 可逐条处理。归档和历史投影在同一事务中批量写入，整批落库与死信转存成功后再提交消费位点。退出时未确认的批次会在重启后重新消费，事件 ID 保证幂等。
+
 ### 5. 打开网页
 
 访问 [http://localhost:8081/](http://localhost:8081/)。页面资源已经内嵌在 Go 程序中，直接随服务启动。

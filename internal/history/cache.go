@@ -21,6 +21,21 @@ func Invalidate(ctx context.Context, rdb *redis.Client, room string) error {
 	return rdb.Set(cacheCtx, VersionKey(room), rand.Text(), time.Minute).Err()
 }
 
+// InvalidateRooms 用一个 pipeline 失效一批房间，避免批量持久化时每条一次 Redis 往返。
+func InvalidateRooms(ctx context.Context, rdb *redis.Client, rooms []string) error {
+	if len(rooms) == 0 {
+		return nil
+	}
+	cacheCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	pipe := rdb.Pipeline()
+	for _, room := range rooms {
+		pipe.Set(cacheCtx, VersionKey(room), rand.Text(), time.Minute)
+	}
+	_, err := pipe.Exec(cacheCtx)
+	return err
+}
+
 func VersionKey(room string) string {
 	return fmt.Sprintf("golitube:history:v1:%x:version", sha256.Sum256([]byte(room)))
 }
