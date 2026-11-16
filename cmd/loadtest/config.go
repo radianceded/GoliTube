@@ -30,6 +30,7 @@ type Config struct {
 	RunID           string
 	OutDir          string
 	SummaryInterval time.Duration
+	StopFile        string
 	SeedOnly        bool
 	Cleanup         bool
 	NoSeed          bool
@@ -63,6 +64,7 @@ func parseConfig() (*Config, error) {
 	flag.StringVar(&cfg.RunID, "run-id", time.Now().Format("20060102-150405"), "本次运行的标识，用于房间名、账号名和结果目录")
 	flag.StringVar(&cfg.OutDir, "out", "", "结果目录，默认 loadtest-results/<run-id>")
 	flag.DurationVar(&cfg.SummaryInterval, "summary-interval", 10*time.Second, "汇总输出间隔")
+	flag.StringVar(&cfg.StopFile, "stop-file", "", "该文件出现时停止发送并写出部分结果；用于后台运行时干净地中途结束")
 	flag.BoolVar(&cfg.SeedOnly, "seed-only", false, "只注入账号并退出")
 	flag.BoolVar(&cfg.Cleanup, "cleanup", false, "删除本次 run id 的测试账号和会话后退出")
 	flag.BoolVar(&cfg.NoSeed, "no-seed", false, "不注入账号；仅适用于不发送的只连接场景")

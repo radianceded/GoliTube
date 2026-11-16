@@ -56,6 +56,30 @@ func sleepCtx(ctx context.Context, duration time.Duration) bool {
 	}
 }
 
+// waitPhase 等待一个阶段结束。stopFile 出现时提前返回 false，调用方仍会
+// 停止发送、排空并写出带 interrupted 标记的 final.json。
+func waitPhase(ctx context.Context, duration time.Duration, stopFile string) bool {
+	deadline := time.Now().Add(duration)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return true
+		}
+		if stopFile != "" {
+			if _, err := os.Stat(stopFile); err == nil {
+				return false
+			}
+		}
+		step := remaining
+		if step > time.Second {
+			step = time.Second
+		}
+		if !sleepCtx(ctx, step) {
+			return false
+		}
+	}
+}
+
 type connectGate struct {
 	interval time.Duration
 	next     time.Time
@@ -171,7 +195,7 @@ func run(ctx context.Context, cfg *Config) error {
 
 	interrupted := false
 	if cfg.Warmup > 0 {
-		if !sleepCtx(ctx, cfg.Warmup) {
+		if !waitPhase(ctx, cfg.Warmup, cfg.StopFile) {
 			interrupted = true
 		}
 	}
@@ -179,7 +203,7 @@ func run(ctx context.Context, cfg *Config) error {
 		stats.BeginMeasurement()
 		stats.SetPhase("measure")
 		log.Printf("预热结束，开始正式测量 %s", cfg.Duration)
-		if !sleepCtx(ctx, cfg.Duration) {
+		if !waitPhase(ctx, cfg.Duration, cfg.StopFile) {
 			interrupted = true
 		}
 	}

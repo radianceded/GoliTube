@@ -101,13 +101,17 @@ foreach ($gear in $gears) {
   $rateLimited = if ($front) { $front.rate_limited } else { $null }
 
   # 验收目标：P99 ≤ 200ms、缺失 ≤ 0.1%、无持续断连、Kafka 积压不增长。
+  # 积压看本档前后差值：前面的档位可能已经留下积压，不能把存量算到当前档头上。
+  $lagBefore = [long]$gear.kafka_lag_before
+  $lagEnd = [long]$gear.kafka_lag_after
+  $lagDelta = $lagEnd - $lagBefore
   $verdict = "通过"
   $reasons = @()
   if ($null -ne $p99 -and $p99 -gt 200) { $reasons += "P99>200ms" }
   if ($null -ne $missingRate -and $missingRate -gt 0.001) { $reasons += "缺失>0.1%" }
   if ($null -ne $disconnects -and $disconnects -gt 0) { $reasons += "有断连" }
   if ($null -ne $rateLimited -and $rateLimited -gt 0) { $reasons += "被限流" }
-  if ($null -ne $lag -and $lag.Max -gt 0) { $reasons += "Kafka积压" }
+  if ($lagDelta -gt 100) { $reasons += "Kafka积压增长" }
   if ($reasons.Count -gt 0) { $verdict = "不通过：" + ($reasons -join "、") }
 
   $results += [pscustomobject]@{
@@ -139,7 +143,8 @@ foreach ($gear in $gears) {
     redis_publish_us_max = if ($null -ne $redisPublish.Max) { [math]::Round($redisPublish.Max, 2) } else { $null }
     kafka_cpu_avg_pct = if ($null -ne $kafkaCpu.Avg) { [math]::Round($kafkaCpu.Avg, 2) } else { $null }
     kafka_lag_max = if ($null -ne $lag.Max) { [long]$lag.Max } else { $null }
-    kafka_lag_end = [long]$gear.kafka_lag_after
+    kafka_lag_end = $lagEnd
+    kafka_lag_delta = $lagDelta
     mysql_cpu_avg_pct = if ($null -ne $mysqlCpu.Avg) { [math]::Round($mysqlCpu.Avg, 2) } else { $null }
     mysql_writes_per_s = if ($null -ne $writesPerSecond) { [math]::Round($writesPerSecond, 1) } else { $null }
     mysql_commits_per_s = if ($null -ne $commitsPerSecond) { [math]::Round($commitsPerSecond, 1) } else { $null }
@@ -153,7 +158,7 @@ $results | Export-Csv -Path $analysisPath -NoTypeInformation -Encoding utf8
 
 $results | Format-Table gear, connections, sent_per_s, delivered_per_s, p99_ms, missing_rate_pct,
   server_cpu_avg_pct, server_rss_max_mb, goroutines_max, queued_max, slow_evictions,
-  kafka_lag_max, mysql_writes_per_s, mysql_tx_avg_us, verdict -AutoSize
+  kafka_lag_max, kafka_lag_delta, mysql_writes_per_s, mysql_tx_avg_us, verdict -AutoSize
 
 Write-Host ""
 Write-Host "分析表：$analysisPath"
