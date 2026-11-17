@@ -31,6 +31,11 @@ func main() {
 		}
 		log.Printf("账号注入完成：%d 个，目录 %s", len(accounts), cfg.OutDir)
 		return
+	case cfg.Reseed:
+		if err := reseedAccounts(ctx, cfg); err != nil {
+			log.Fatal(err)
+		}
+		return
 	case cfg.Cleanup:
 		if err := cleanupAccounts(ctx, cfg); err != nil {
 			log.Fatal(err)
@@ -131,7 +136,7 @@ func run(ctx context.Context, cfg *Config) error {
 		}
 	}
 
-	stats := newStats(rooms, nil)
+	stats := newStats(rooms, nil, cfg.Tag, cfg.NoDedup)
 	gate := newConnectGate(cfg.ConnectRate)
 	senderIndex := 0
 	connected := 0

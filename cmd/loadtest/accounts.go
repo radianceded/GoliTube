@@ -158,6 +158,31 @@ func readAccounts(outDir string) ([]Account, error) {
 	return accounts, nil
 }
 
+// reseedAccounts 按 accounts.json 里的原令牌重写 Redis 会话。Redis 重启后
+// 已建立的 WebSocket 仍持有旧 Cookie，重写同一令牌即可恢复发送，无需重连。
+func reseedAccounts(ctx context.Context, cfg *Config) error {
+	accounts, err := readAccounts(cfg.OutDir)
+	if err != nil {
+		return fmt.Errorf("读取账号文件失败（-out 应指向原运行目录）: %w", err)
+	}
+	rdb, err := openRedis(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer rdb.Close()
+	for _, account := range accounts {
+		payload, err := json.Marshal(map[string]string{"id": account.UserID, "username": account.Username})
+		if err != nil {
+			return err
+		}
+		if err := rdb.Set(ctx, sessionKey(account.Token), payload, 24*time.Hour).Err(); err != nil {
+			return err
+		}
+	}
+	log.Printf("已恢复 %d 个会话", len(accounts))
+	return nil
+}
+
 // cleanupAccounts 删除本次运行注入的账号、会话，避免测试库和 Redis 持续增长。
 func cleanupAccounts(ctx context.Context, cfg *Config) error {
 	if cfg.MySQLDSN == "" {

@@ -42,9 +42,11 @@ $gears = @(
   [pscustomobject]@{ Name = "mr-50x5";    Conn = 500;  Rooms = 50;  Rate = 5;  Warmup = 20; Duration = 90; ConnectRate = 100 },
   [pscustomobject]@{ Name = "mr-100x10";  Conn = 1000; Rooms = 100; Rate = 10; Warmup = 20; Duration = 90; ConnectRate = 100 },
   [pscustomobject]@{ Name = "mr-200x10";  Conn = 2000; Rooms = 200; Rate = 10; Warmup = 20; Duration = 90; ConnectRate = 100 },
+  [pscustomobject]@{ Name = "mr-300x10";  Conn = 3000; Rooms = 300; Rate = 10; Warmup = 20; Duration = 90; ConnectRate = 150 },
   [pscustomobject]@{ Name = "hs-100x50";  Conn = 100;  Rooms = 1;   Rate = 50; Warmup = 20; Duration = 90; ConnectRate = 100 },
   [pscustomobject]@{ Name = "hs-500x100"; Conn = 500;  Rooms = 1;   Rate = 100; Warmup = 20; Duration = 90; ConnectRate = 100 },
-  [pscustomobject]@{ Name = "hs-1000x200"; Conn = 1000; Rooms = 1;  Rate = 200; Warmup = 20; Duration = 90; ConnectRate = 150 }
+  [pscustomobject]@{ Name = "hs-1000x200"; Conn = 1000; Rooms = 1;  Rate = 200; Warmup = 20; Duration = 90; ConnectRate = 150 },
+  [pscustomobject]@{ Name = "stability-1000"; Conn = 1000; Rooms = 100; Rate = 10; Warmup = 60; Duration = 1800; ConnectRate = 100 }
 )
 if ($Only) {
   $wanted = $Only -split ","

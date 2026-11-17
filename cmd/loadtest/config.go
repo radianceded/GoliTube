@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"math"
@@ -27,13 +29,17 @@ type Config struct {
 	MySQLDSN        string
 	RedisAddr       string
 	RoomPrefix      string
+	Room            string
+	Tag             uint16
 	RunID           string
 	OutDir          string
 	SummaryInterval time.Duration
 	StopFile        string
 	SeedOnly        bool
+	Reseed          bool
 	Cleanup         bool
 	NoSeed          bool
+	NoDedup         bool
 }
 
 func envOr(key, fallback string) string {
@@ -61,18 +67,27 @@ func parseConfig() (*Config, error) {
 	flag.StringVar(&cfg.MySQLDSN, "mysql-dsn", envOr("GOLITUBE_LOADTEST_MYSQL_DSN", ""), "测试库 DSN，用于注入账号")
 	flag.StringVar(&cfg.RedisAddr, "redis-addr", envOr("GOLITUBE_LOADTEST_REDIS_ADDR", "127.0.0.1:6379"), "Redis 地址，用于注入会话")
 	flag.StringVar(&cfg.RoomPrefix, "room-prefix", "lt", "房间名前缀，最终名称包含 run id")
+	flag.StringVar(&cfg.Room, "room", "", "所有连接使用同一个固定房间名；设置后忽略 -rooms，用于多实例共享同一房间")
 	flag.StringVar(&cfg.RunID, "run-id", time.Now().Format("20060102-150405"), "本次运行的标识，用于房间名、账号名和结果目录")
 	flag.StringVar(&cfg.OutDir, "out", "", "结果目录，默认 loadtest-results/<run-id>")
 	flag.DurationVar(&cfg.SummaryInterval, "summary-interval", 10*time.Second, "汇总输出间隔")
 	flag.StringVar(&cfg.StopFile, "stop-file", "", "该文件出现时停止发送并写出部分结果；用于后台运行时干净地中途结束")
 	flag.BoolVar(&cfg.SeedOnly, "seed-only", false, "只注入账号并退出")
+	flag.BoolVar(&cfg.Reseed, "reseed", false, "按 -out 中的 accounts.json 重新写入 Redis 会话后退出，用于 Redis 重启后恢复")
 	flag.BoolVar(&cfg.Cleanup, "cleanup", false, "删除本次 run id 的测试账号和会话后退出")
 	flag.BoolVar(&cfg.NoSeed, "no-seed", false, "不注入账号；仅适用于不发送的只连接场景")
+	flag.BoolVar(&cfg.NoDedup, "no-dedup", false, "跳过重复检测；多进程共享房间时各进程序号不连续，重复统计不可用")
 	flag.Parse()
 
 	if cfg.OutDir == "" {
 		cfg.OutDir = "loadtest-results/" + cfg.RunID
 	}
+	if cfg.Room != "" {
+		cfg.Rooms = 1
+	}
+	// 不同压测进程可能向同一房间发送，用 run id 的 16 位标签抬高各自的序号起点。
+	tagSum := sha256.Sum256([]byte(cfg.RunID))
+	cfg.Tag = binary.BigEndian.Uint16(tagSum[:2])
 	if cfg.WSURL == "" {
 		cfg.WSURL = deriveWSURL(cfg.BaseURL)
 	}
@@ -102,6 +117,9 @@ func (c *Config) validate() error {
 	}
 	if c.Connections < c.Rooms {
 		return fmt.Errorf("-connections(%d) 不能小于 -rooms(%d)", c.Connections, c.Rooms)
+	}
+	if c.Room != "" && (len(c.Room) > 128 || strings.TrimSpace(c.Room) == "") {
+		return fmt.Errorf("-room 须为非空且不超过 128 字节的房间名")
 	}
 	if c.RatePerRoom < 0 {
 		return fmt.Errorf("-rate 不能为负数")
@@ -154,6 +172,9 @@ func (c *Config) roomShape() (connsPerRoom, sendersPerRoom int) {
 }
 
 func (c *Config) roomID(index int) string {
+	if c.Room != "" {
+		return c.Room
+	}
 	return fmt.Sprintf("%s-%s-r%03d", c.RoomPrefix, c.RunID, index)
 }
 

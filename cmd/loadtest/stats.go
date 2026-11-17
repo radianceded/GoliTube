@@ -148,6 +148,7 @@ type Stats struct {
 	serverErrors    atomic.Int64
 
 	shuttingDown  atomic.Bool
+	skipDedup     bool
 	sendingPaused atomic.Bool
 	phase         atomic.Value
 	start         time.Time
@@ -161,7 +162,7 @@ type Stats struct {
 	disconnectReasons map[string]int
 }
 
-func newStats(rooms []*Room, conns []*Conn) *Stats {
+func newStats(rooms []*Room, conns []*Conn, tag uint16, skipDedup bool) *Stats {
 	stats := &Stats{
 		ring:              newLatencyRing(20),
 		lat:               metrics.NewHistogram(),
@@ -169,7 +170,10 @@ func newStats(rooms []*Room, conns []*Conn) *Stats {
 		conns:             conns,
 		start:             time.Now(),
 		disconnectReasons: make(map[string]int),
+		skipDedup:         skipDedup,
 	}
+	// 每个进程从 tag<<40 开始编号，多个压测进程共享房间时 ID 不会冲突。
+	stats.nextSeq.Store(uint64(tag) << 40)
 	stats.phase.Store("connect")
 	return stats
 }
@@ -263,7 +267,7 @@ func (s *Stats) handleMessage(conn *Conn, data []byte) {
 	if seq <= s.epochSeq.Load() {
 		return
 	}
-	if conn.Seen.Mark(seq) {
+	if !s.skipDedup && conn.Seen.Mark(seq) {
 		s.duplicates.Add(1)
 		conn.Room.Duplicates.Add(1)
 		return
