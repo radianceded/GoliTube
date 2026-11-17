@@ -14,6 +14,7 @@ import (
 	"github.com/radianceded/GoliTube/internal/auth"
 	"github.com/radianceded/GoliTube/internal/danmaku"
 	"github.com/radianceded/GoliTube/internal/history"
+	"github.com/radianceded/GoliTube/internal/metrics"
 	"github.com/radianceded/GoliTube/internal/persistence"
 	"github.com/radianceded/GoliTube/internal/ratelimit"
 	"github.com/radianceded/GoliTube/internal/realtime"
@@ -56,6 +57,7 @@ func handleWebSocket(hub *realtime.Hub, publish func(context.Context, danmaku.Ro
 				return danmaku.RoomEvent{}, &danmaku.ProtocolError{Type: "error", Code: "auth_unavailable", Message: "账号服务暂不可用"}
 			}
 			if !allowed {
+				metrics.RateLimited.Add(1)
 				return danmaku.RoomEvent{}, realtime.RateLimitedError()
 			}
 			return danmaku.Decode(room, kind, data, user.ID, user.Username)
@@ -85,6 +87,9 @@ const idleTimeout = 2 * time.Minute
 // enqueue 为 nil 时仅通过 Redis 实时广播，不写入 Kafka。
 // ctx 取消后优雅退出：停止接收新连接，等待在途请求，再向 WebSocket 客户端发送关闭帧。
 func Run(ctx context.Context, addr, redisAddr string, enqueue func(context.Context, danmaku.RoomEvent) error) error {
+	// 压测时关闭逐连接日志；错误日志和周期汇总保留。
+	realtime.SetConnectionLogging(os.Getenv("GOLITUBE_QUIET") != "1")
+
 	rdb := redis.NewClient(&redis.Options{
 		Addr:                  redisAddr,
 		DialTimeout:           3 * time.Second,
@@ -143,6 +148,19 @@ func Run(ctx context.Context, addr, redisAddr string, enqueue func(context.Conte
 	if enqueue != nil {
 		publish = persistence.DurablePublish(enqueue, publish)
 	}
+	// 计时包住 Kafka 接收确认与 Redis 发布，不含 MySQL 落库。
+	measuredPublish := publish
+	publish = func(ctx context.Context, event danmaku.RoomEvent) error {
+		started := time.Now()
+		err := measuredPublish(ctx, event)
+		metrics.PublishLatency.Record(time.Since(started))
+		if err != nil {
+			metrics.PublishErrors.Add(1)
+		} else {
+			metrics.Publishes.Add(1)
+		}
+		return err
+	}
 	var query func(context.Context, history.Query) (history.Page, error)
 	var appDB *sql.DB
 	if dsn := os.Getenv("GOLITUBE_MYSQL_DSN"); dsn != "" {
@@ -159,6 +177,11 @@ func Run(ctx context.Context, addr, redisAddr string, enqueue func(context.Conte
 	a := &auth.Handler{DB: appDB, RDB: rdb, Namespace: "golitube", SecureCookie: os.Getenv("GOLITUBE_COOKIE_SECURE") == "1",
 		TrustLoopbackProxy: os.Getenv("GOLITUBE_TRUST_LOOPBACK_PROXY") == "1"}
 	router := newRouter(a, hub, query, publish)
+	metricsEnabled := os.Getenv("GOLITUBE_METRICS") == "1"
+	registerDebugRoutes(router, hub, metricsEnabled, os.Getenv("GOLITUBE_PPROF") == "1")
+	if metricsEnabled {
+		metrics.StartReporter(ctx, 30*time.Second, metrics.Sources{Rooms: hub.LocalRoomCounts, Queued: hub.Queued})
+	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
