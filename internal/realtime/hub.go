@@ -37,11 +37,15 @@ const (
 	writeWait    = 5 * time.Second
 )
 
-var upgrader = websocket.Upgrader{}
+// WriteBufferPool 让空闲连接归还 4KiB 写缓冲，降低大连接数时的常驻内存与 GC 压力。
+var upgrader = websocket.Upgrader{
+	WriteBufferPool: &sync.Pool{},
+}
 
 type Message struct {
-	Type int
-	Data []byte
+	Type     int
+	Data     []byte
+	Prepared *websocket.PreparedMessage
 }
 
 // a ws message waiting to be sent
@@ -85,7 +89,11 @@ func (c *Client) writePump(interval time.Duration) {
 			return
 		}
 
-		err = c.Conn.WriteMessage(message.Type, message.Data)
+		if message.Prepared != nil {
+			err = c.Conn.WritePreparedMessage(message.Prepared)
+		} else {
+			err = c.Conn.WriteMessage(message.Type, message.Data)
+		}
 		if err != nil {
 			metrics.WriteErrors.Add(1)
 			logConnection("发送消息失败: %v", err)
@@ -101,6 +109,11 @@ type Hub struct {
 	mu      sync.Mutex
 	rooms   map[string]map[*websocket.Conn]*Client
 	closing bool // CloseAll 之后不再接纳新连接。
+
+	batchMu       sync.Mutex
+	batchMaxItems int
+	batchWindow   time.Duration
+	batches       map[string]*roomBatch
 }
 
 func NewHub() *Hub {
@@ -114,6 +127,7 @@ func goingAwayFrame() []byte {
 // CloseAll 向本实例的所有连接发送 1001（离开）关闭帧，并等待读循环退出、成员清理完成。
 // 调用后 Hub 不再接纳新连接。ctx 到期后强制断开剩余连接。
 func (h *Hub) CloseAll(ctx context.Context) {
+	h.FlushAllBatches()
 	h.mu.Lock()
 	h.closing = true
 	var conns []*websocket.Conn
@@ -155,21 +169,28 @@ func (h *Hub) CloseAll(ctx context.Context) {
 }
 
 func (h *Hub) Broadcast(roomID string, messageType int, message []byte) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.broadcastWithCount(roomID, messageType, message, 1)
+}
 
+func (h *Hub) broadcastWithCount(roomID string, messageType int, message []byte, itemsPerFrame int64) {
+	// 预先构建一次 WebSocket 帧，避免同房间 N 条连接各自重复打包。
+	outbound := Message{Type: messageType, Data: message}
+	if prepared, err := websocket.NewPreparedMessage(messageType, message); err == nil {
+		outbound.Prepared = prepared
+		outbound.Data = nil
+	}
+
+	var delivered, evicted int64
+	h.mu.Lock()
 	members := h.rooms[roomID]
 	for conn, client := range members {
 		select {
-		case client.Send <- Message{
-			Type: messageType,
-			Data: message,
-		}:
+		case client.Send <- outbound:
 			// 成功放入该客户端的发送队列。
-			metrics.Deliveries.Add(1)
+			delivered += itemsPerFrame
 		default:
 			// 队列没有可用位置，移除并断开慢连接。
-			metrics.SlowEvictions.Add(1)
+			evicted++
 			logConnection("发送队列已满，断开连接")
 			delete(members, conn)
 			close(client.Send)
@@ -179,6 +200,14 @@ func (h *Hub) Broadcast(roomID string, messageType int, message []byte) {
 
 	if len(members) == 0 {
 		delete(h.rooms, roomID)
+	}
+	h.mu.Unlock()
+
+	if delivered > 0 {
+		metrics.Deliveries.Add(delivered)
+	}
+	if evicted > 0 {
+		metrics.SlowEvictions.Add(evicted)
 	}
 }
 

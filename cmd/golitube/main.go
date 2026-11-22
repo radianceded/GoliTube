@@ -20,7 +20,8 @@ func main() {
 	redisAddr := flag.String("redis-addr", "127.0.0.1:6379", "Redis 服务地址")
 	mode := flag.String("mode", "server", "运行模式：server、persist 或 migrate-history")
 	brokers := flag.String("kafka-brokers", "", "Kafka 地址，逗号分隔；server 留空时仅实时广播")
-	batchSize := flag.Int("persist-batch", 100, "persist 模式每批消息数，1～1000；最多等待 50ms")
+	batchSize := flag.Int("persist-batch", 200, "persist 模式每批消息数，1～1000；最多等待 50ms")
+	persistWorkers := flag.Int("persist-workers", 3, "persist 模式并行消费者数，1～16；默认 3 对应 topic 分区数")
 	flag.Parse()
 
 	// systemd 停止服务默认发送 SIGTERM，开发时的 Ctrl+C 是 SIGINT。
@@ -40,7 +41,7 @@ func main() {
 			writer.Close()
 		}
 	case "persist":
-		err = persistence.Run(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"), *redisAddr, *batchSize)
+		err = persistence.RunWithWorkers(ctx, strings.Split(*brokers, ","), os.Getenv("GOLITUBE_MYSQL_DSN"), *redisAddr, *batchSize, *persistWorkers)
 	case "migrate-history":
 		err = persistence.RunBackfill(ctx, os.Getenv("GOLITUBE_MYSQL_DSN"))
 	default:

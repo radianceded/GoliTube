@@ -11,6 +11,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -34,6 +35,16 @@ const maxBatchBytes = 1 << 20
 const deadLetterTopic = "golitube-danmaku-dlq"
 const deadLetterRetentionMS = "2592000000" // 30 天
 
+// 生产者按分区并发合批：高并发下多个 WebSocket 读协程共享一次 Produce RPC，
+// 低流量时最多等待 5ms 即发出，同时保持同步确认（Async=false, RequireAll）。
+// 500 条上限避免高并发或磁盘抖动时被迫拆成多次串行 Produce RPC；Snappy 压缩降低磁盘写放大。
+const (
+	producerBatchSize     = 500
+	producerBatchTimeout  = 10 * time.Millisecond
+	defaultPersistWorkers = 3
+	maxPersistWorkers     = 16
+)
+
 //go:embed schema.sql
 var persistenceSchema string
 
@@ -44,7 +55,9 @@ func NewEventWriter(brokers []string) *kafka.Writer {
 		Balancer:     &kafka.Hash{}, // 同一房间使用同一个分区键。
 		RequiredAcks: kafka.RequireAll,
 		Async:        false, // 等待 Kafka 确认接收，不等待 MySQL 写入。
-		BatchSize:    1,
+		BatchSize:    producerBatchSize,
+		BatchTimeout: producerBatchTimeout,
+		Compression:  kafka.Snappy,
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,
 		MaxAttempts:  3,
@@ -55,6 +68,10 @@ func NewDeadLetterWriter(brokers []string) *kafka.Writer {
 	writer := NewEventWriter(brokers)
 	writer.Topic = deadLetterTopic
 	writer.Balancer = nil
+	// 死信由消费端串行逐条写入，不等待合批窗口，避免每条死信平白多等 5ms。
+	writer.BatchSize = 1
+	writer.BatchTimeout = 0
+	writer.Compression = 0
 	writer.BatchBytes = 10 << 20 // 与 NewEventReader 的 MaxBytes 一致，保证读得到的消息都写得进去。
 	return writer
 }
@@ -190,8 +207,8 @@ func NewDB(dsn string) (*sql.DB, error) {
 		return nil, errors.New("MySQL 连接配置无效")
 	}
 	db := sql.OpenDB(connector)
-	db.SetMaxOpenConns(2)
-	db.SetMaxIdleConns(2)
+	db.SetMaxOpenConns(16)
+	db.SetMaxIdleConns(8)
 	db.SetConnMaxLifetime(3 * time.Minute)
 	return db, nil
 }
@@ -234,6 +251,7 @@ func saveRoomEventsWithInvalidation(ctx context.Context, db *sql.DB, events []da
 	query.WriteString("INSERT INTO danmaku (id, room_id, message_type, data) VALUES ")
 	args := make([]any, 0, len(events)*4)
 	ids := make([]any, 0, len(events))
+	uniqueEvents := make([]danmaku.RoomEvent, 0, len(events))
 	seenIDs := make(map[string]bool, len(events))
 	for _, event := range events {
 		if seenIDs[event.ID] {
@@ -248,33 +266,43 @@ func saveRoomEventsWithInvalidation(ctx context.Context, db *sql.DB, events []da
 		if data == nil {
 			data = []byte{}
 		}
+		event.Data = data
 		args = append(args, event.ID, event.RoomID, event.Type, data)
 		ids = append(ids, event.ID)
+		uniqueEvents = append(uniqueEvents, event)
 	}
 	query.WriteString(" ON DUPLICATE KEY UPDATE id = id")
-	if _, err := tx.ExecContext(ctx, query.String(), args...); err != nil {
-		return err
-	}
-
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	// 锁定读使用当前已保存的行，不依赖事务快照或客户端提交的重复载荷。
-	rows, err := tx.QueryContext(ctx, "SELECT id, room_id, message_type, data FROM danmaku WHERE id IN ("+placeholders+") FOR UPDATE", ids...)
+	res, err := tx.ExecContext(ctx, query.String(), args...)
 	if err != nil {
 		return err
 	}
-	stored := make([]danmaku.RoomEvent, 0, len(ids))
-	for rows.Next() {
-		var event danmaku.RoomEvent
-		if err := rows.Scan(&event.ID, &event.RoomID, &event.Type, &event.Data); err != nil {
-			rows.Close()
+
+	var stored []danmaku.RoomEvent
+	// go-sql-driver/mysql 默认不启用 ClientFoundRows：ON DUPLICATE KEY UPDATE id = id
+	// 对每条新插入行计 1，对已存在且未变更的冲突行计 0。仅当发生冲突/重放时才回表锁定读。
+	if affected, affErr := res.RowsAffected(); affErr == nil && affected == int64(len(uniqueEvents)) {
+		stored = uniqueEvents
+	} else {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		// 锁定读使用当前已保存的行，不依赖事务快照或客户端提交的重复载荷。
+		rows, err := tx.QueryContext(ctx, "SELECT id, room_id, message_type, data FROM danmaku WHERE id IN ("+placeholders+") FOR UPDATE", ids...)
+		if err != nil {
 			return err
 		}
-		stored = append(stored, event)
-	}
-	readErr := rows.Err()
-	rows.Close()
-	if readErr != nil {
-		return readErr
+		stored = make([]danmaku.RoomEvent, 0, len(ids))
+		for rows.Next() {
+			var event danmaku.RoomEvent
+			if err := rows.Scan(&event.ID, &event.RoomID, &event.Type, &event.Data); err != nil {
+				rows.Close()
+				return err
+			}
+			stored = append(stored, event)
+		}
+		readErr := rows.Err()
+		rows.Close()
+		if readErr != nil {
+			return readErr
+		}
 	}
 	if _, err := history.ProjectBatch(ctx, tx, stored); err != nil {
 		return err
@@ -308,8 +336,17 @@ func NewEventReader(brokers []string, group string) *kafka.Reader {
 }
 
 func Run(ctx context.Context, brokers []string, dsn, redisAddr string, batchSize int) error {
+	return RunWithWorkers(ctx, brokers, dsn, redisAddr, batchSize, defaultPersistWorkers)
+}
+
+// RunWithWorkers 在同一消费组内启动 workers 个并行消费者。
+// Kafka 消费组协议会将各分区自动分配给不同 worker，同一房间经 Hash 分区仍由单个 worker 顺序处理。
+func RunWithWorkers(ctx context.Context, brokers []string, dsn, redisAddr string, batchSize, workers int) error {
 	if batchSize < 1 || batchSize > maxBatchSize {
 		return fmt.Errorf("persist-batch 必须为 1～%d", maxBatchSize)
+	}
+	if workers < 1 || workers > maxPersistWorkers {
+		return fmt.Errorf("persist-workers 必须为 1～%d", maxPersistWorkers)
 	}
 	for _, broker := range brokers {
 		if strings.TrimSpace(broker) == "" {
@@ -321,29 +358,56 @@ func Run(ctx context.Context, brokers []string, dsn, redisAddr string, batchSize
 		return err
 	}
 	defer db.Close()
+	if maxOpen := workers * 2; maxOpen > 16 {
+		db.SetMaxOpenConns(maxOpen)
+		db.SetMaxIdleConns(workers)
+	}
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, ContextTimeoutEnabled: true,
 		DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second})
 	defer rdb.Close()
-	reader := NewEventReader(brokers, persistenceGroup)
-	defer reader.Close()
 	// 先建 topic 再消费：死信 topic 不存在时，写入会在遇到第一条坏消息时才失败。
 	if err := EnsureDeadLetterTopic(ctx, brokers); err != nil {
 		return fmt.Errorf("创建死信 topic 失败: %w", err)
 	}
 	deadLetters := NewDeadLetterWriter(brokers)
 	defer deadLetters.Close()
-	log.Printf("启动弹幕持久化消费者，消费组: %s 批量: %d 死信 topic: %s", persistenceGroup, batchSize, deadLetterTopic)
-	err = ConsumeBatches(ctx, reader.FetchMessage, func(ctx context.Context, events []danmaku.RoomEvent) error {
-		return saveRoomEventsWithInvalidation(ctx, db, events, func(ctx context.Context, rooms []string) error {
-			return history.InvalidateRooms(ctx, rdb, rooms)
-		})
-	}, reader.CommitMessages, func(ctx context.Context, message kafka.Message, reason error) error {
-		return DeadLetter(ctx, deadLetters, message, reason)
-	}, batchSize)
+	log.Printf("启动弹幕持久化消费者，消费组: %s 并发数: %d 批量: %d 死信 topic: %s", persistenceGroup, workers, batchSize, deadLetterTopic)
+
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
+	var (
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reader := NewEventReader(brokers, persistenceGroup)
+			defer reader.Close()
+			workerErr := ConsumeBatches(workerCtx, reader.FetchMessage, func(ctx context.Context, events []danmaku.RoomEvent) error {
+				return saveRoomEventsWithInvalidation(ctx, db, events, func(ctx context.Context, rooms []string) error {
+					return history.InvalidateRooms(ctx, rdb, rooms)
+				})
+			}, reader.CommitMessages, func(ctx context.Context, message kafka.Message, reason error) error {
+				return DeadLetter(ctx, deadLetters, message, reason)
+			}, batchSize)
+			if workerErr != nil && workerCtx.Err() == nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = workerErr
+				}
+				errMu.Unlock()
+				cancelWorkers()
+			}
+		}()
+	}
+	wg.Wait()
 	if ctx.Err() != nil {
 		return nil
 	}
-	return err
+	return firstErr
 }
 
 // 串行消费：当前消息写入成功并提交后，才处理下一条，防止越过失败消息提交位点。

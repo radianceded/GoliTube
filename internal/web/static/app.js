@@ -319,11 +319,18 @@ function connectSocket() {
       }
       return;
     }
-    if (message.type !== "danmaku" || message.room_id !== state.room || !message.id || typeof message.content !== "string") return;
-    appendLive(message);
-    if (state.user && message.user_id === state.user.id) {
-      statusText("send-status", "已收到房间回传。历史记录可能稍后才可查询。");
+    const handleDanmaku = (item) => {
+      if (!item || item.type !== "danmaku" || item.room_id !== state.room || !item.id || typeof item.content !== "string") return;
+      appendLive(item);
+      if (state.user && item.user_id === state.user.id) {
+        statusText("send-status", "已收到房间回传。历史记录可能稍后才可查询。");
+      }
+    };
+    if (message.type === "danmaku_batch" && Array.isArray(message.items)) {
+      for (const item of message.items) handleDanmaku(item);
+      return;
     }
+    handleDanmaku(message);
   });
   socket.addEventListener("close", () => {
     if (state.socket !== socket) return;

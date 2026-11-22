@@ -46,7 +46,7 @@ func (h *Hub) ConsumeEvents(ctx context.Context, sub *redis.PubSub) {
 				continue
 			}
 
-			h.Broadcast(event.RoomID, event.Type, event.Data)
+			h.EnqueueBroadcast(event.RoomID, event.Type, event.Data)
 		}
 	}
 }

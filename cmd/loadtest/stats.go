@@ -238,6 +238,10 @@ func (s *Stats) handleMessage(conn *Conn, data []byte) {
 		Type    string `json:"type"`
 		Code    string `json:"code"`
 		Content string `json:"content"`
+		Items   []struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		} `json:"items"`
 	}
 	if err := json.Unmarshal(data, &message); err != nil {
 		s.invalid.Add(1)
@@ -254,11 +258,29 @@ func (s *Stats) handleMessage(conn *Conn, data []byte) {
 		}
 		return
 	}
+	if message.Type == "danmaku_batch" {
+		if len(message.Items) == 0 {
+			s.invalid.Add(1)
+			return
+		}
+		for _, item := range message.Items {
+			if item.Type != "danmaku" {
+				s.invalid.Add(1)
+				continue
+			}
+			s.recordDanmaku(conn, item.Content)
+		}
+		return
+	}
 	if message.Type != "danmaku" {
 		s.invalid.Add(1)
 		return
 	}
-	seq, ok := parseMessageID(message.Content)
+	s.recordDanmaku(conn, message.Content)
+}
+
+func (s *Stats) recordDanmaku(conn *Conn, content string) {
+	seq, ok := parseMessageID(content)
 	if !ok {
 		s.invalid.Add(1)
 		return

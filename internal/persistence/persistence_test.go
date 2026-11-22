@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/radianceded/GoliTube/internal/danmaku"
@@ -292,5 +293,38 @@ func TestConsumeBatchesDeadLettersInvalid(t *testing.T) {
 	}
 	if saved != 1 || deadLettered != 1 || len(committed) != 2 {
 		t.Fatalf("saved=%d dead=%d committed=%d", saved, deadLettered, len(committed))
+	}
+}
+
+func TestWriterBatchConfiguration(t *testing.T) {
+	writer := NewEventWriter([]string{"127.0.0.1:19092"})
+	defer writer.Close()
+	if writer.Topic != persistenceTopic || writer.Async || writer.RequiredAcks != kafka.RequireAll {
+		t.Fatalf("unexpected event writer reliability config: topic=%q async=%v acks=%v", writer.Topic, writer.Async, writer.RequiredAcks)
+	}
+	if writer.BatchSize != producerBatchSize || writer.BatchTimeout != producerBatchTimeout || writer.Compression != kafka.Snappy {
+		t.Fatalf("unexpected event writer batch config: size=%d timeout=%v compression=%v", writer.BatchSize, writer.BatchTimeout, writer.Compression)
+	}
+
+	dlq := NewDeadLetterWriter([]string{"127.0.0.1:19092"})
+	defer dlq.Close()
+	if dlq.Topic != deadLetterTopic || dlq.Async || dlq.RequiredAcks != kafka.RequireAll {
+		t.Fatalf("unexpected dlq writer reliability config: topic=%q async=%v acks=%v", dlq.Topic, dlq.Async, dlq.RequiredAcks)
+	}
+	if dlq.BatchSize != 1 || dlq.BatchTimeout != 0 || dlq.Compression != 0 || dlq.BatchBytes != 10<<20 {
+		t.Fatalf("unexpected dlq writer batch config: size=%d timeout=%v compression=%v bytes=%d", dlq.BatchSize, dlq.BatchTimeout, dlq.Compression, dlq.BatchBytes)
+	}
+}
+
+func TestRunWithWorkersValidation(t *testing.T) {
+	for _, workers := range []int{0, -1, maxPersistWorkers + 1} {
+		err := RunWithWorkers(t.Context(), []string{"127.0.0.1:19092"}, "dsn", "127.0.0.1:6379", 100, workers)
+		if err == nil || !strings.Contains(err.Error(), "persist-workers") {
+			t.Fatalf("workers=%d err=%v", workers, err)
+		}
+	}
+	// 确认 timeout 常量仍在预期毫秒范围内，避免低流量引入明显等待。
+	if producerBatchTimeout <= 0 || producerBatchTimeout > 20*time.Millisecond {
+		t.Fatalf("unexpected producerBatchTimeout: %v", producerBatchTimeout)
 	}
 }
