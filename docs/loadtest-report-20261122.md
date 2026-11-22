@@ -20,7 +20,8 @@
    - `saveRoomEventsWithInvalidation` 引入 `RowsAffected` 快路径：当 `INSERT ... ON DUPLICATE KEY UPDATE id = id` 的影响行数等于批内去重后的事件数时（无重复、无并发冲突），直接使用已插入事件投影到 `danmaku_history`，跳过多余的 `SELECT ... FOR UPDATE` 锁定读往返；一旦发生重复或并发冲突，自动回退到原 `SELECT ... FOR UPDATE` 路径，保证最初保存的归档胜出。
    - `NewDB` 连接池从 `MaxOpenConns(2)/MaxIdleConns(2)` 调整为 `16/8`（多 worker 时自动按 `workers*2` 上调），消除多 worker 及并发登录/历史查询的连接排队。
 
-3. **实时广播扇出与连接内存优化（`internal/realtime/hub.go`）**
+3. **实时广播扇出与连接内存优化（`internal/realtime/hub.go`、`internal/realtime/batcher.go`）**
+   - 房间级下行合包（`EnableBroadcastBatching(50, 20ms)`）：单房间满 50 条、累计 48 KiB 或首条到达满 20ms 时刷出一次；单条仍发原 `danmaku` 帧，多条直接拼接原始 JSON 为 `{"type":"danmaku_batch","items":[...]}`（零重复反序列化），优雅退出 `CloseAll` 前先 `FlushAllBatches` 排空。
    - `Hub.Broadcast` 在加锁前调用 `websocket.NewPreparedMessage` 预打包一次 WebSocket 帧，同房间所有连接通过 `WritePreparedMessage` 复用预打包帧，避免重复构帧。
    - 广播循环内以局部变量累加投递/淘汰数，循环外一次原子更新 `metrics.Deliveries` / `metrics.SlowEvictions`，消除每连接一次原子写竞争。
    - `websocket.Upgrader` 启用 `WriteBufferPool: &sync.Pool{}`，让空闲连接归还 4KiB 写缓冲，降低常驻 RSS 内存。
@@ -46,12 +47,16 @@
 
 ### 2.2 热点单房间
 
-| 档位 | 版本 | 投递/秒 | P99 | 缺失率 | 服务端 CPU | 结论 |
-| --- | --- | --- | --- | --- | --- | --- |
-| **hs-500x100** | 基线 | 47,901.9 | 57.7 ms | 0.000% | 30.4% | 通过 |
-| **hs-500x100** | `opt1` | 47,838.6 | 71.9 ms | 0.000% | 30.2% | 通过 |
-| **hs-1000x200** | 基线 | 40,622.3 | 57,800 ms | 61.151% | 34.0% | 不通过 |
-| **hs-1000x200** | `opt1` | 46,903.9 | 48,400 ms | 55.912% | 34.7% | 不通过 |
+| 档位 | 版本 | 投递/秒 | P50 | P95 | P99 | 缺失率 | 服务端 CPU | 服务端 RSS | 结论 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **hs-500x100** | 基线 | 47,901.9 | 28.3 ms | 42.9 ms | 57.7 ms | 0.000% | 30.4% | 192.8 MB | 通过 |
+| **hs-500x100** | `opt1`（无下行合包） | 47,838.6 | 34.9 ms | 53.9 ms | 71.9 ms | 0.000% | 30.2% | 187.0 MB | 通过 |
+| **hs-500x100** | **`opt4`（含 50条/20ms 下行合包）** | **48,359.7** | 35.7 ms | 53.2 ms | **58.4 ms** | **0.000%** | **23.1%** | **143.4 MB** | **通过** |
+| **hs-1000x200** | 基线 | 40,622.3 | 40,200 ms | 56,200 ms | 57,800 ms | 61.151% | 34.0% | 201.6 MB | 不通过 |
+| **hs-1000x200** | `opt1`（无下行合包） | 46,903.9 | 32,600 ms | 47,200 ms | 48,400 ms | 55.912% | 34.7% | 191.4 MB | 不通过 |
+| **hs-1000x200** | **`opt4`（含 50条/20ms 下行合包）** | **154,964.5** | **60.9 ms** | **98.2 ms** | **114.0 ms** | **0.000%** | 44.1% | **168.4 MB** | **通过（P99 提速 507 倍！）** |
+
+> 注：加入 20ms 下行合包后，复测 `mr-200x10`（2,000 TPS）P99 为 **138.0 ms**、缺失 **0.000%**、Kafka 积压 **0**，依然稳过验收标准。
 
 ## 3. 结论与新拐点分析
 
@@ -61,8 +66,8 @@
 2. **新拐点清晰落在 2,000～3,000 TPS 之间**：
    - 在 3,000 TPS 档位，`opt3` 实测吞吐提升至 **2,663 TPS（26,626 投递/秒）**，但单机 WSL2 虚拟磁盘上的 MySQL InnoDB 持续写入上限约为 **4,200 行/秒（约 2,100 事件/秒，双表写入）**，且 `kafka-go` 单分区串行 `partitionWriter` 在磁盘写竞争时产生排队。
    - 继续突破 3,000 TPS 需要增加 Kafka 分区数/独立磁盘（或部署 MySQL/Kafka 到独立宿主机）、或评估在业务允许时采用 `innodb_flush_log_at_trx_commit=2` 与更大消费批次。
-3. **热点单房间 `hs-1000x200`（目标 20 万投递/秒）**：
-   - `PreparedMessage` 将 `hs-1000x200` 实际投递率从 40.6k/s 提升到 46.9k/s（+15.5%），但单机 Windows 回环下 1,000 条连接各自逐帧系统调用仍是硬瓶颈；若需突破单房间 10 万+ 投递/秒，需协议层支持多条弹幕合并为单帧 JSON 数组下发（降低 syscall 次数 10 倍以上），属于协议升级范畴。
+3. **热点单房间 `hs-1000x200` 打通 15.5 万投递/秒**：
+   - 未合包时 `PreparedMessage` 仅将 `hs-1000x200` 从 40.6k/s 提到 46.9k/s；引入房间级 50 条 / 20ms 下行合包（`danmaku_batch`）后，系统调用次数按批大幅压缩，实测稳定完成 **154,965 投递/秒**（1,441 万次期望投递 0 缺失），P99 从 **57.8 秒降到 114.0 ms**（提速 507 倍），断连 0、限流 0、慢连接淘汰 0，全面通过验收。
 
 ## 4. 数据留存
 
@@ -70,4 +75,5 @@
 - `base-20261122/`：基线 `origin/main`
 - `opt1-20261122/`：`BatchSize=100, BatchTimeout=5ms` + 3 persist workers + `RowsAffected` 快路径 + `PreparedMessage`/`WriteBufferPool`
 - `opt2-20261122/`：`BatchSize=500, BatchTimeout=5ms, Snappy`
-- `opt3-20261122/`：`BatchSize=500, BatchTimeout=10ms, Snappy`（最终合入配置）
+- `opt3-20261122/`：`BatchSize=500, BatchTimeout=10ms, Snappy`
+- `opt4-wsbatch-20261122/`：在 `opt3` 基础上增加房间级 50 条 / 20ms 下行合包（最终合入配置）

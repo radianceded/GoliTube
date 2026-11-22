@@ -108,6 +108,7 @@ func Run(ctx context.Context, addr, redisAddr string, enqueue func(context.Conte
 	log.Println("Redis 连接成功")
 
 	hub := realtime.NewHub()
+	hub.EnableBroadcastBatching(realtime.DefaultBroadcastBatchSize, realtime.DefaultBroadcastBatchWindow)
 	subCtx, stopSubscription := context.WithCancel(context.Background())
 	sub := rdb.Subscribe(subCtx, realtime.Channel)
 

@@ -109,6 +109,11 @@ type Hub struct {
 	mu      sync.Mutex
 	rooms   map[string]map[*websocket.Conn]*Client
 	closing bool // CloseAll 之后不再接纳新连接。
+
+	batchMu       sync.Mutex
+	batchMaxItems int
+	batchWindow   time.Duration
+	batches       map[string]*roomBatch
 }
 
 func NewHub() *Hub {
@@ -122,6 +127,7 @@ func goingAwayFrame() []byte {
 // CloseAll 向本实例的所有连接发送 1001（离开）关闭帧，并等待读循环退出、成员清理完成。
 // 调用后 Hub 不再接纳新连接。ctx 到期后强制断开剩余连接。
 func (h *Hub) CloseAll(ctx context.Context) {
+	h.FlushAllBatches()
 	h.mu.Lock()
 	h.closing = true
 	var conns []*websocket.Conn
@@ -163,6 +169,10 @@ func (h *Hub) CloseAll(ctx context.Context) {
 }
 
 func (h *Hub) Broadcast(roomID string, messageType int, message []byte) {
+	h.broadcastWithCount(roomID, messageType, message, 1)
+}
+
+func (h *Hub) broadcastWithCount(roomID string, messageType int, message []byte, itemsPerFrame int64) {
 	// 预先构建一次 WebSocket 帧，避免同房间 N 条连接各自重复打包。
 	outbound := Message{Type: messageType, Data: message}
 	if prepared, err := websocket.NewPreparedMessage(messageType, message); err == nil {
@@ -177,7 +187,7 @@ func (h *Hub) Broadcast(roomID string, messageType int, message []byte) {
 		select {
 		case client.Send <- outbound:
 			// 成功放入该客户端的发送队列。
-			delivered++
+			delivered += itemsPerFrame
 		default:
 			// 队列没有可用位置，移除并断开慢连接。
 			evicted++
