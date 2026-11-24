@@ -452,6 +452,7 @@ func ConsumeBatches(ctx context.Context,
 		messages := []kafka.Message{first}
 		batchBytes := len(first.Value) + len(first.Key)
 		events := make([]danmaku.RoomEvent, 0, batchSize)
+		eventMessages := make([]kafka.Message, 0, batchSize)
 		invalid := make([]invalidMessage, 0)
 		add := func(message kafka.Message) {
 			event, reason := decodeEvent(message)
@@ -460,6 +461,7 @@ func ConsumeBatches(ctx context.Context,
 				return
 			}
 			events = append(events, event)
+			eventMessages = append(eventMessages, message)
 		}
 		add(first)
 
@@ -489,11 +491,11 @@ func ConsumeBatches(ctx context.Context,
 		}
 
 		if len(events) > 0 {
-			if err := retryUntilDone(ctx, fmt.Sprintf("批量保存 %d 条弹幕", len(events)), func(ctx context.Context) error {
-				return save(ctx, events)
-			}); err != nil {
+			failedItems, err := saveBatchWithFallback(ctx, events, eventMessages, save)
+			if err != nil {
 				return err
 			}
+			invalid = append(invalid, failedItems...)
 		}
 		for _, bad := range invalid {
 			if deadLetter == nil {
@@ -530,6 +532,87 @@ func decodeEvent(message kafka.Message) (danmaku.RoomEvent, error) {
 		return event, errors.New("非法 Kafka 事件")
 	}
 	return event, nil
+}
+
+// isNonRetryableDataError 判断写库错误是否由单条数据本身违反数据库约束导致（重试也不会成功）。
+// 连接断开、超时、死锁（1213）、锁等待超时（1205）等基础设施/并发错误一律视为可重试。
+func isNonRetryableDataError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) {
+		return false
+	}
+	switch mysqlErr.Number {
+	case 1048, // ER_BAD_NULL_ERROR: Column cannot be null
+		1264, // ER_WARN_DATA_OUT_OF_RANGE: Out of range value
+		1366, // ER_TRUNCATED_WRONG_VALUE_FOR_FIELD: Incorrect string/charset value
+		1406, // ER_DATA_TOO_LONG: Data too long for column
+		1452, // ER_NO_REFERENCED_ROW_2: Foreign key constraint fails
+		3819: // ER_CHECK_CONSTRAINT_VIOLATED: Check constraint violated
+		return true
+	default:
+		return false
+	}
+}
+
+// saveBatchWithFallback 优先批量落库；遇到可重试错误（如 MySQL 停服/抖动）按原策略持续重试。
+// 若遇到不可重试的数据库数据约束错误，降级为逐条写库，将坏消息剥离返回给上层转存死信，
+// 保证同批正常消息顺利入库而不阻塞分区消费。
+func saveBatchWithFallback(
+	ctx context.Context,
+	events []danmaku.RoomEvent,
+	eventMessages []kafka.Message,
+	save func(context.Context, []danmaku.RoomEvent) error,
+) ([]invalidMessage, error) {
+	batchErr, err := retryUnlessNonRetryable(ctx, fmt.Sprintf("批量保存 %d 条弹幕", len(events)), func(ctx context.Context) error {
+		return save(ctx, events)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if batchErr == nil {
+		return nil, nil
+	}
+	if len(events) == 1 {
+		return []invalidMessage{{message: eventMessages[0], reason: batchErr}}, nil
+	}
+
+	log.Printf("批量保存 %d 条弹幕遇到不可重试数据错误，降级为逐条写入以隔离坏消息: %v", len(events), batchErr)
+	var failed []invalidMessage
+	for i, event := range events {
+		itemErr, err := retryUnlessNonRetryable(ctx, fmt.Sprintf("降级单条保存弹幕 %s", event.ID), func(ctx context.Context) error {
+			return save(ctx, []danmaku.RoomEvent{event})
+		})
+		if err != nil {
+			return nil, err
+		}
+		if itemErr != nil {
+			failed = append(failed, invalidMessage{message: eventMessages[i], reason: itemErr})
+		}
+	}
+	return failed, nil
+}
+
+// retryUnlessNonRetryable 在下游暂时不可用时每秒重试；若遇到不可重试数据错误则立即返回该错误供上层隔离。
+func retryUnlessNonRetryable(ctx context.Context, what string, operation func(context.Context) error) (nonRetryableErr error, fatalErr error) {
+	for {
+		opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := operation(opCtx)
+		cancel()
+		if err == nil {
+			return nil, nil
+		}
+		if isNonRetryableDataError(err) {
+			return err, nil
+		}
+		log.Printf("%s失败，暂不提交，1 秒后重试: %v", what, err)
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // 下游暂时不可用时每秒重试同一个操作，直到成功或 ctx 取消；期间不读取下一条也不提交位点。
